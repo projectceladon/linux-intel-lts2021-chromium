@@ -589,15 +589,23 @@ static void native_machine_emergency_restart(void)
 	int orig_reboot_type = reboot_type;
 	unsigned short mode;
 
-	if (reboot_emergency)
+	pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
+	if (reboot_emergency) {
+	    pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
 		emergency_vmx_disable_all();
+	    pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
+    }
 
+	pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
 	tboot_shutdown(TB_SHUTDOWN_REBOOT);
+	pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
+
 
 	/* Tell the BIOS if we want cold or warm reboot */
 	mode = reboot_mode == REBOOT_WARM ? 0x1234 : 0;
 	*((unsigned short *)__va(0x472)) = mode;
 
+	pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
 	/*
 	 * If an EFI capsule has been registered with the firmware then
 	 * override the reboot= parameter.
@@ -608,8 +616,10 @@ static void native_machine_emergency_restart(void)
 	}
 
 	for (;;) {
+	    pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
 		/* Could also try the reset bit in the Hammer NB */
 		switch (reboot_type) {
+		pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
 		case BOOT_ACPI:
 			acpi_reboot();
 			mdelay(15);
@@ -711,10 +721,12 @@ void native_machine_shutdown(void)
 #ifdef CONFIG_X86_64
 	x86_platform.iommu_shutdown();
 #endif
+	pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
 }
 
 static void __machine_emergency_restart(int emergency)
 {
+	pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
 	reboot_emergency = emergency;
 	machine_ops.emergency_restart();
 }
@@ -767,6 +779,7 @@ void machine_power_off(void)
 
 void machine_shutdown(void)
 {
+	pr_notice("%s - %d reboot_type:%x\n", __FUNCTION__, __LINE__, reboot_type);
 	machine_ops.shutdown();
 }
 

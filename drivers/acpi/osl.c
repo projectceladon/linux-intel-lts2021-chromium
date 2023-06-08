@@ -667,6 +667,7 @@ EXPORT_SYMBOL(acpi_os_read_port);
 
 acpi_status acpi_os_write_port(acpi_io_address port, u32 value, u32 width)
 {
+	printk("%s - %d  port:%x, value:%x width:%x\n", __FUNCTION__, __LINE__, port, value, width);
 	if (width <= 8) {
 		outb(value, port);
 	} else if (width <= 16) {
@@ -755,6 +756,7 @@ acpi_os_write_memory(acpi_physical_address phys_addr, u64 value, u32 width)
 		unmap = true;
 	}
 
+	printk("%s - %d  va:%llx, value:%x\n", __FUNCTION__, __LINE__, virt_addr, value);
 	switch (width) {
 	case 8:
 		writeb(value, virt_addr);

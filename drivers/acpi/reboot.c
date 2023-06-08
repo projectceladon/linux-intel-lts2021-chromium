@@ -38,21 +38,27 @@ void acpi_reboot(void)
 	struct acpi_generic_address *rr;
 	u8 reset_value;
 
-	if (acpi_disabled)
+	if (acpi_disabled) {
+		pr_notice("%s - %d \n", __FUNCTION__, __LINE__);
 		return;
+    }
 
 	rr = &acpi_gbl_FADT.reset_register;
 
 	/* ACPI reset register was only introduced with v2 of the FADT */
 
-	if (acpi_gbl_FADT.header.revision < 2)
+	if (acpi_gbl_FADT.header.revision < 2) {
+		pr_notice("%s - %d \n", __FUNCTION__, __LINE__);
 		return;
+    }
 
 	/* Is the reset register supported? The spec says we should be
 	 * checking the bit width and bit offset, but Windows ignores
 	 * these fields */
-	if (!(acpi_gbl_FADT.flags & ACPI_FADT_RESET_REGISTER))
+	if (!(acpi_gbl_FADT.flags & ACPI_FADT_RESET_REGISTER)) {
+		pr_notice("%s - %d \n", __FUNCTION__, __LINE__);
 		return;
+    }
 
 	reset_value = acpi_gbl_FADT.reset_value;
 
@@ -60,13 +66,17 @@ void acpi_reboot(void)
 	 * on a device on bus 0. */
 	switch (rr->space_id) {
 	case ACPI_ADR_SPACE_PCI_CONFIG:
+		pr_notice("%s - %d rr->space_id:%x\n", __FUNCTION__, __LINE__, rr->space_id);
 		acpi_pci_reboot(rr, reset_value);
+		pr_notice("%s - %d rr->space_id:%x\n", __FUNCTION__, __LINE__, rr->space_id);
 		break;
 
 	case ACPI_ADR_SPACE_SYSTEM_MEMORY:
 	case ACPI_ADR_SPACE_SYSTEM_IO:
 		pr_debug("ACPI MEMORY or I/O RESET_REG.\n");
+		pr_notice("%s - %d rr->space_id:%x\n", __FUNCTION__, __LINE__, rr->space_id);
 		acpi_reset();
+		pr_notice("%s - %d rr->space_id:%x\n", __FUNCTION__, __LINE__, rr->space_id);
 		break;
 	}
 
@@ -78,5 +88,7 @@ void acpi_reboot(void)
 	 * The 15ms delay has been found to be long enough for the system
 	 * to reboot on the affected platforms.
 	 */
+	pr_notice("%s - %d \n", __FUNCTION__, __LINE__);
 	mdelay(15);
+	pr_notice("%s - %d \n", __FUNCTION__, __LINE__);
 }

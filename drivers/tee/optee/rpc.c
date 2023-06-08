@@ -8,11 +8,17 @@
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/i2c.h>
+#include <linux/io.h>
 #include <linux/slab.h>
 #include <linux/tee_drv.h>
+#include "optee_bench.h"
 #include "optee_private.h"
 #include "optee_smc.h"
 #include "optee_rpc_cmd.h"
+
+#if defined(CONFIG_OPTEE_VSOCK)
+extern phys_addr_t optee_shm_offset;
+#endif
 
 struct wq_entry {
 	struct list_head link;
@@ -285,7 +291,6 @@ static struct tee_shm *cmd_alloc_suppl(struct tee_context *ctx, size_t sz)
 }
 
 static void handle_rpc_func_cmd_shm_alloc(struct tee_context *ctx,
-					  struct optee *optee,
 					  struct optee_msg_arg *arg,
 					  struct optee_call_ctx *call_ctx)
 {
@@ -315,8 +320,10 @@ static void handle_rpc_func_cmd_shm_alloc(struct tee_context *ctx,
 		shm = cmd_alloc_suppl(ctx, sz);
 		break;
 	case OPTEE_RPC_SHM_TYPE_KERNEL:
-		shm = tee_shm_alloc(optee->ctx, sz,
-				    TEE_SHM_MAPPED | TEE_SHM_PRIV);
+		shm = tee_shm_alloc(ctx, sz, TEE_SHM_MAPPED);
+		break;
+	case OPTEE_RPC_SHM_TYPE_GLOBAL:
+		shm = tee_shm_alloc(ctx, sz, TEE_SHM_MAPPED | TEE_SHM_DMA_BUF);
 		break;
 	default:
 		arg->ret = TEEC_ERROR_BAD_PARAMETERS;
@@ -332,6 +339,9 @@ static void handle_rpc_func_cmd_shm_alloc(struct tee_context *ctx,
 		arg->ret = TEEC_ERROR_BAD_PARAMETERS;
 		goto bad;
 	}
+#if defined(CONFIG_OPTEE_VSOCK)
+	pa = pa - optee_shm_offset;
+#endif
 
 	sz = tee_shm_get_size(shm);
 
@@ -426,6 +436,7 @@ static void handle_rpc_func_cmd_shm_free(struct tee_context *ctx,
 		cmd_free_suppl(ctx, shm);
 		break;
 	case OPTEE_RPC_SHM_TYPE_KERNEL:
+	case OPTEE_RPC_SHM_TYPE_GLOBAL:
 		tee_shm_free(shm);
 		break;
 	default:
@@ -449,6 +460,50 @@ void optee_rpc_finalize_call(struct optee_call_ctx *call_ctx)
 	free_pages_list(call_ctx);
 }
 
+static void handle_rpc_func_cmd_bm_reg(struct optee_msg_arg *arg)
+{
+	u64 size;
+	u64 type;
+	u64 paddr;
+
+	if (arg->num_params != 1)
+		goto bad;
+
+	if ((arg->params[0].attr & OPTEE_MSG_ATTR_TYPE_MASK) !=
+			OPTEE_MSG_ATTR_TYPE_VALUE_INPUT)
+		goto bad;
+
+	type = arg->params[0].u.value.a;
+	switch (type) {
+	case OPTEE_MSG_RPC_CMD_BENCH_REG_NEW:
+		size = arg->params[0].u.value.c;
+		paddr = arg->params[0].u.value.b;
+		down_write(&optee_bench_ts_rwsem);
+		optee_bench_ts_global =
+			memremap(paddr, size, MEMREMAP_WB);
+		if (!optee_bench_ts_global) {
+			up_write(&optee_bench_ts_rwsem);
+			goto bad;
+		}
+		up_write(&optee_bench_ts_rwsem);
+		break;
+	case OPTEE_MSG_RPC_CMD_BENCH_REG_DEL:
+		down_write(&optee_bench_ts_rwsem);
+		if (optee_bench_ts_global)
+			memunmap(optee_bench_ts_global);
+		optee_bench_ts_global = NULL;
+		up_write(&optee_bench_ts_rwsem);
+		break;
+	default:
+		goto bad;
+	}
+
+	arg->ret = TEEC_SUCCESS;
+	return;
+bad:
+	arg->ret = TEEC_ERROR_BAD_PARAMETERS;
+}
+
 static void handle_rpc_func_cmd(struct tee_context *ctx, struct optee *optee,
 				struct tee_shm *shm,
 				struct optee_call_ctx *call_ctx)
@@ -460,6 +515,14 @@ static void handle_rpc_func_cmd(struct tee_context *ctx, struct optee *optee,
 		pr_err("%s: tee_shm_get_va %p failed\n", __func__, shm);
 		return;
 	}
+
+#if defined(CONFIG_OPTEE_VSOCK)
+	if (copy_shm(arg, (shm->paddr - optee_shm_offset), shm->size) < 0) {
+		pr_err("%s: copy_shm 0x%llx/0x%lx failed\n", __func__,
+			(shm->paddr - optee_shm_offset), shm->size);
+		return;
+	}
+#endif
 
 	switch (arg->cmd) {
 	case OPTEE_RPC_CMD_GET_TIME:
@@ -473,13 +536,16 @@ static void handle_rpc_func_cmd(struct tee_context *ctx, struct optee *optee,
 		break;
 	case OPTEE_RPC_CMD_SHM_ALLOC:
 		free_pages_list(call_ctx);
-		handle_rpc_func_cmd_shm_alloc(ctx, optee, arg, call_ctx);
+		handle_rpc_func_cmd_shm_alloc(ctx, arg, call_ctx);
 		break;
 	case OPTEE_RPC_CMD_SHM_FREE:
 		handle_rpc_func_cmd_shm_free(ctx, arg);
 		break;
 	case OPTEE_RPC_CMD_I2C_TRANSFER:
 		handle_rpc_func_cmd_i2c_transfer(ctx, arg);
+		break;
+	case OPTEE_RPC_CMD_BENCH_REG:
+		handle_rpc_func_cmd_bm_reg(arg);
 		break;
 	default:
 		handle_rpc_supp_cmd(ctx, arg);
@@ -504,9 +570,11 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 
 	switch (OPTEE_SMC_RETURN_GET_RPC_FUNC(param->a0)) {
 	case OPTEE_SMC_RPC_FUNC_ALLOC:
-		shm = tee_shm_alloc(optee->ctx, param->a1,
-				    TEE_SHM_MAPPED | TEE_SHM_PRIV);
+		shm = tee_shm_alloc(ctx, param->a1, TEE_SHM_MAPPED);
 		if (!IS_ERR(shm) && !tee_shm_get_pa(shm, 0, &pa)) {
+#if defined(CONFIG_OPTEE_VSOCK)
+			pa = pa - optee_shm_offset;
+#endif
 			reg_pair_from_64(&param->a1, &param->a2, pa);
 			reg_pair_from_64(&param->a4, &param->a5,
 					 (unsigned long)shm);
@@ -529,6 +597,16 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 		 * vector.
 		 */
 		break;
+#if defined(CONFIG_OPTEE_VSOCK)
+	case OPTEE_SMC_RPC_FUNC_COPY_SHM:
+		/*
+		 * Receive shared memory copy request from OP-TEE,
+		 * just return to do shm copy.
+		 * Will change a0 to OPTEE_SMC_CALL_RETURN_FROM_RPC later.
+		 */
+		param->a0 = OPTEE_SMC_RETURN_RPC_COPY_SHM;
+		return;
+#endif
 	case OPTEE_SMC_RPC_FUNC_CMD:
 		shm = reg_pair_to_ptr(param->a1, param->a2);
 		handle_rpc_func_cmd(ctx, optee, shm, call_ctx);

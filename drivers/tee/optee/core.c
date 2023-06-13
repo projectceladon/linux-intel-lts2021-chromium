@@ -48,7 +48,7 @@
 
 static struct socket *host_smc_sock = NULL;
 static struct socket *tee_sock = NULL;
-phys_addr_t optee_shm_offset;
+unsigned long optee_shm_offset = 0;
 
 static DEFINE_SEMAPHORE(optee_smc_lock);
 #endif
@@ -63,6 +63,8 @@ static DEFINE_SEMAPHORE(optee_smc_lock);
 
 #define OPTEE_HANDLE_DONE		0xa5a5a5a5
 
+#define OPTEE_SHM_SMC_SIZE		0x200000
+
 struct ivshmem_private {
 	struct pci_dev *dev;
 
@@ -73,12 +75,12 @@ struct ivshmem_private {
 	u8                  *base_addr;
 	u32                 *msix_addr;
 
-	unsigned int        bar0_addr;
-	unsigned int        bar0_len;
-	unsigned int        bar1_addr;
-	unsigned int        bar1_len;
-	unsigned int        bar2_addr;
-	unsigned int        bar2_len;
+	unsigned long       bar0_addr;
+	unsigned long       bar0_len;
+	unsigned long       bar1_addr;
+	unsigned long       bar1_len;
+	unsigned long       bar2_addr;
+	unsigned long       bar2_len;
 
 	char                (*msix_names)[256];
 	struct msix_entry   *msix_entries;
@@ -120,6 +122,8 @@ static struct optee_smc_args *g_smc_args = NULL;
 static struct optee_smc_ring *smc_avail_ring = NULL;
 static struct optee_smc_ring *smc_used_ring = NULL;
 static struct optee_vm_ids *smc_vm_ids = NULL;
+
+unsigned long optee_shm_offset = 0;
 
 //spinlock used to protect SMC ring operations
 static DEFINE_SPINLOCK(smc_ring_lock);
@@ -196,6 +200,8 @@ int optee_from_msg_param(struct tee_param *params, size_t num_params,
 					return -EINVAL;
 				}
 			}
+#elif defined(CONFIG_OPTEE_IVSHMEM)
+			pa = pa - optee_shm_offset;
 #endif
 			p->u.memref.shm_offs = mp->u.tmem.buf_ptr - pa;
 			p->u.memref.shm = shm;
@@ -246,7 +252,7 @@ static int to_msg_param_tmp_mem(struct optee_msg_param *mp,
 	rc = tee_shm_get_pa(p->u.memref.shm, p->u.memref.shm_offs, &pa);
 	if (rc)
 		return rc;
-#if defined(CONFIG_OPTEE_VSOCK)
+#if defined(CONFIG_OPTEE_VSOCK) || defined(CONFIG_OPTEE_IVSHMEM)
 	pa = pa - optee_shm_offset;
 #endif
 
@@ -622,6 +628,11 @@ optee_config_shm_memremap(optee_invoke_fn *invoke_fn, void **memremaped_shm)
 	}
 	paddr = virt_to_phys(va);
 	optee_shm_offset = paddr - begin;
+#elif defined(CONFIG_OPTEE_IVSHMEM)
+	paddr = g_ivshmem_dev.bar2_addr + OPTEE_SHM_SMC_SIZE;
+	optee_shm_offset = paddr - begin;
+	pr_info("shared memory from tee 0x%llx/0x%lx/0x%llx/0x%lx\n",
+		begin, size, paddr, optee_shm_offset);
 #else
 	paddr = begin;
 #endif
@@ -1260,16 +1271,16 @@ static int ivshmem_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	g_ivshmem_dev.bar2_addr = pci_resource_start(pdev, 2);
 	g_ivshmem_dev.bar2_len = pci_resource_len(pdev, 2);
 
-	pr_info("ivshmem BAR0: 0x%0x, %d\n", g_ivshmem_dev.bar0_addr,
+	pr_info("ivshmem BAR0: 0x%lx, %ld\n", g_ivshmem_dev.bar0_addr,
 			g_ivshmem_dev.bar0_len);
-	pr_info("ivshmem BAR1: 0x%0x, %d\n", g_ivshmem_dev.bar1_addr,
+	pr_info("ivshmem BAR1: 0x%lx, %ld\n", g_ivshmem_dev.bar1_addr,
 			g_ivshmem_dev.bar1_len);
-	pr_info("ivshmem BAR2: 0x%0x, %d\n", g_ivshmem_dev.bar2_addr,
+	pr_info("ivshmem BAR2: 0x%lx, %ld\n", g_ivshmem_dev.bar2_addr,
 			g_ivshmem_dev.bar2_len);
 
 	g_ivshmem_dev.regs_addr = ioremap(g_ivshmem_dev.bar0_addr, g_ivshmem_dev.bar0_len);
 	if (!g_ivshmem_dev.regs_addr) {
-		pr_err("ivshmem unable to ioremap bar0, size: %d\n", g_ivshmem_dev.bar0_len);
+		pr_err("ivshmem unable to ioremap bar0, size: %ld\n", g_ivshmem_dev.bar0_len);
 		goto release_regions;
 	}
 
@@ -1284,7 +1295,7 @@ static int ivshmem_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		*(g_ivshmem_dev.msix_addr+2), *(g_ivshmem_dev.msix_addr+3));
 
 	g_ivshmem_dev.base_addr = (u8 *)memremap(g_ivshmem_dev.bar2_addr,
-		g_ivshmem_dev.bar2_len, MEMREMAP_WT);
+		OPTEE_SHM_SMC_SIZE, MEMREMAP_WT);
 	if (!g_ivshmem_dev.base_addr) {
 		pr_err("base memory ioremap failed\n");
 		goto iounmap_bar1;

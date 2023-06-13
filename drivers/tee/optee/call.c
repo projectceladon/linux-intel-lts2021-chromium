@@ -22,8 +22,8 @@
 #include <asm/io.h>
 #endif
 
-#if defined(CONFIG_OPTEE_VSOCK)
-extern phys_addr_t optee_shm_offset;
+#if defined(CONFIG_OPTEE_VSOCK) || defined(CONFIG_OPTEE_IVSHMEM)
+extern unsigned long optee_shm_offset;
 #endif
 
 struct optee_call_waiter {
@@ -146,6 +146,8 @@ u32 optee_do_call_with_arg(struct tee_context *ctx, phys_addr_t parg)
 	size_t arg_size = OPTEE_MSG_GET_ARG_SIZE(msg_arg->num_params);
 
 	param.a3 = arg_size;
+	parg = parg - optee_shm_offset;
+#elif defined(CONFIG_OPTEE_IVSHMEM)
 	parg = parg - optee_shm_offset;
 #endif
 

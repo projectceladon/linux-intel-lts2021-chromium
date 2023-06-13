@@ -16,8 +16,8 @@
 #include "optee_smc.h"
 #include "optee_rpc_cmd.h"
 
-#if defined(CONFIG_OPTEE_VSOCK)
-extern phys_addr_t optee_shm_offset;
+#if defined(CONFIG_OPTEE_VSOCK) || defined(CONFIG_OPTEE_IVSHMEM)
+extern unsigned long optee_shm_offset;
 #endif
 
 struct wq_entry {
@@ -339,7 +339,7 @@ static void handle_rpc_func_cmd_shm_alloc(struct tee_context *ctx,
 		arg->ret = TEEC_ERROR_BAD_PARAMETERS;
 		goto bad;
 	}
-#if defined(CONFIG_OPTEE_VSOCK)
+#if defined(CONFIG_OPTEE_VSOCK) || defined(CONFIG_OPTEE_IVSHMEM)
 	pa = pa - optee_shm_offset;
 #endif
 
@@ -572,7 +572,7 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 	case OPTEE_SMC_RPC_FUNC_ALLOC:
 		shm = tee_shm_alloc(ctx, param->a1, TEE_SHM_MAPPED);
 		if (!IS_ERR(shm) && !tee_shm_get_pa(shm, 0, &pa)) {
-#if defined(CONFIG_OPTEE_VSOCK)
+#if defined(CONFIG_OPTEE_VSOCK) || defined(CONFIG_OPTEE_IVSHMEM)
 			pa = pa - optee_shm_offset;
 #endif
 			reg_pair_from_64(&param->a1, &param->a2, pa);

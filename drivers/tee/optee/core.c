@@ -998,6 +998,11 @@ static int optee_probe(struct platform_device *pdev)
 		pr_warn("host_smc_sock accept failed 0x%x\n", rc);
 		goto err_release_sock;
 	}
+#elif defined(CONFIG_OPTEE_IVSHMEM)
+	if (g_ivshmem_dev.dev == NULL) {
+		pr_warn("ivshmem not found\n");
+		return -EINVAL;
+	}
 #endif
 	invoke_fn = optee_smccc_smc;
 #else

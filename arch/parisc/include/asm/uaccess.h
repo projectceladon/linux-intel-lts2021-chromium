@@ -7,6 +7,7 @@
  */
 #include <asm/page.h>
 #include <asm/cache.h>
+#include <asm/extable.h>
 
 #include <linux/bug.h>
 #include <linux/string.h>
@@ -85,9 +86,9 @@ struct exception_table_entry {
 							\
 	__asm__("1: " ldx " 0(" sr "%2),%0\n"		\
 		"9:\n"					\
-		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(1b, 9b)	\
-		: "=r"(__gu_val), "=r"(__gu_err)        \
-		: "r"(ptr), "1"(__gu_err));		\
+		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(1b, 9b, "%1")	\
+		: "=r"(__gu_val), "+r"(__gu_err)        \
+		: "i"(sr), "r"(ptr));			\
 							\
 	(val) = (__force __typeof__(*(ptr))) __gu_val;	\
 }
@@ -118,10 +119,10 @@ struct exception_table_entry {
 		"1: ldw 0(" sr "%2),%0\n"		\
 		"2: ldw 4(" sr "%2),%R0\n"		\
 		"9:\n"					\
-		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(1b, 9b)	\
-		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(2b, 9b)	\
-		: "=&r"(__gu_tmp.l), "=r"(__gu_err)	\
-		: "r"(ptr), "1"(__gu_err));		\
+		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(1b, 9b, "%1")	\
+		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(2b, 9b, "%1")	\
+		: "=&r"(__gu_tmp.l), "+r"(__gu_err)	\
+		: "i"(sr), "r"(ptr));			\
 							\
 	(val) = __gu_tmp.t;				\
 }
@@ -175,9 +176,9 @@ struct exception_table_entry {
 	__asm__ __volatile__ (					\
 		"1: " stx " %2,0(" sr "%1)\n"			\
 		"9:\n"						\
-		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(1b, 9b)		\
-		: "=r"(__pu_err)				\
-		: "r"(ptr), "r"(x), "0"(__pu_err))
+		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(1b, 9b, "%0")	\
+		: "+r"(__pu_err)				\
+		: "r"(x), "i"(sr), "r"(ptr))
 
 
 #if !defined(CONFIG_64BIT)
@@ -187,14 +188,13 @@ struct exception_table_entry {
 		"1: stw %2,0(" sr "%1)\n"			\
 		"2: stw %R2,4(" sr "%1)\n"			\
 		"9:\n"						\
-		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(1b, 9b)		\
-		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(2b, 9b)		\
-		: "=r"(__pu_err)				\
-		: "r"(ptr), "r"(__val), "0"(__pu_err));		\
+		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(1b, 9b, "%0")	\
+		ASM_EXCEPTIONTABLE_ENTRY_EFAULT(2b, 9b, "%0")	\
+		: "+r"(__pu_err)				\
+		: "r"(__val), "i"(sr), "r"(ptr));		\
 } while (0)
 
 #endif /* !defined(CONFIG_64BIT) */
-
 
 /*
  * Complex access routines -- external declarations
@@ -216,8 +216,5 @@ unsigned long __must_check raw_copy_from_user(void *dst, const void __user *src,
 					    unsigned long len);
 #define INLINE_COPY_TO_USER
 #define INLINE_COPY_FROM_USER
-
-struct pt_regs;
-int fixup_exception(struct pt_regs *regs);
 
 #endif /* __PARISC_UACCESS_H */

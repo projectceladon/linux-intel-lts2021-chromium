@@ -106,6 +106,58 @@ static int sof_ipc4_trigger_pipelines(struct snd_soc_component *component,
 		pipeline->state = state;
 	}
 
+	/* no need to pause before reset or before pause release */
+	if (state == SOF_IPC4_PIPE_RESET || cmd == SNDRV_PCM_TRIGGER_PAUSE_RELEASE)
+		goto skip_pause_transition;
+
+	/*
+	 * set paused state for pipelines if the final state is PAUSED or when the pipeline
+	 * is set to RUNNING for the first time after the PCM is started.
+	 */
+	ret = sof_ipc4_set_multi_pipeline_state(sdev, SOF_IPC4_PIPE_PAUSED, trigger_list);
+	if (ret < 0) {
+		dev_err(sdev->dev, "failed to pause all pipelines\n");
+		goto free;
+	}
+
+	/* update PAUSED state for all pipelines just triggered */
+	for (i = 0; i < pipeline_list->count ; i++) {
+		spipe = pipeline_list->pipelines[i];
+		sof_ipc4_update_pipeline_state(sdev, SOF_IPC4_PIPE_PAUSED, cmd, spipe,
+					       trigger_list);
+	}
+
+	/* return if this is the final state */
+	if (state == SOF_IPC4_PIPE_PAUSED)
+		goto free;
+skip_pause_transition:
+	/* else set the RUNNING/RESET state in the DSP */
+	ret = sof_ipc4_set_multi_pipeline_state(sdev, state, trigger_list);
+	if (ret < 0) {
+		dev_err(sdev->dev, "failed to set final state %d for all pipelines\n", state);
+		/*
+		 * workaround: if the firmware is crashed while setting the
+		 * pipelines to reset state we must ignore the error code and
+		 * reset it to 0.
+		 * Since the firmware is crashed we will not send IPC messages
+		 * and we are going to see errors printed, but the state of the
+		 * widgets will be correct for the next boot.
+		 */
+		if (sdev->fw_state != SOF_FW_CRASHED || state != SOF_IPC4_PIPE_RESET)
+			goto free;
+
+		ret = 0;
+	}
+
+	/* update RUNNING/RESET state for all pipelines that were just triggered */
+	for (i = 0; i < pipeline_list->count; i++) {
+		spipe = pipeline_list->pipelines[i];
+		sof_ipc4_update_pipeline_state(sdev, state, cmd, spipe, trigger_list);
+	}
+
+free:
+	mutex_unlock(&ipc4_data->pipeline_state_mutex);
+	kfree(trigger_list);
 	return ret;
 }
 

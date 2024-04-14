@@ -277,6 +277,13 @@ int __init xbc_init(char *buf, const char **emsg, int *epos);
 /* XBC cleanup data structures */
 void __init xbc_destroy_all(void);
 
+void __init _xbc_exit(bool early);
+
+static inline void xbc_exit(void)
+{
+	_xbc_exit(false);
+}
+
 /* Debug dump functions */
 void __init xbc_debug_dump(void);
 

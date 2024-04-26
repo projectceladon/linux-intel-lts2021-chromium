@@ -3169,29 +3169,6 @@ out_put_prog:
 	return err;
 }
 
-static int bpf_prog_attach_check_attach_type(const struct bpf_prog *prog,
-					     enum bpf_attach_type attach_type)
-{
-	switch (prog->type) {
-	case BPF_PROG_TYPE_CGROUP_SOCK:
-	case BPF_PROG_TYPE_CGROUP_SOCK_ADDR:
-	case BPF_PROG_TYPE_CGROUP_SOCKOPT:
-	case BPF_PROG_TYPE_SK_LOOKUP:
-		return attach_type == prog->expected_attach_type ? 0 : -EINVAL;
-	case BPF_PROG_TYPE_CGROUP_SKB:
-		if (!capable(CAP_NET_ADMIN))
-			/* cg-skb progs can be loaded by unpriv user.
-			 * check permissions at attach time.
-			 */
-			return -EPERM;
-		return prog->enforce_expected_attach_type &&
-			prog->expected_attach_type != attach_type ?
-			-EINVAL : 0;
-	default:
-		return 0;
-	}
-}
-
 static enum bpf_prog_type
 attach_type_to_prog_type(enum bpf_attach_type attach_type)
 {
@@ -3247,10 +3224,83 @@ attach_type_to_prog_type(enum bpf_attach_type attach_type)
 	}
 }
 
-#define BPF_PROG_ATTACH_LAST_FIELD replace_bpf_fd
+static int bpf_prog_attach_check_attach_type(const struct bpf_prog *prog,
+                                             enum bpf_attach_type attach_type)
+{
+        enum bpf_prog_type ptype;
+
+        switch (prog->type) {
+        case BPF_PROG_TYPE_CGROUP_SOCK:
+        case BPF_PROG_TYPE_CGROUP_SOCK_ADDR:
+        case BPF_PROG_TYPE_CGROUP_SOCKOPT:
+        case BPF_PROG_TYPE_SK_LOOKUP:
+                return attach_type == prog->expected_attach_type ? 0 : -EINVAL;
+        case BPF_PROG_TYPE_CGROUP_SKB:
+                if (!capable(CAP_NET_ADMIN))
+                        /* cg-skb progs can be loaded by unpriv user.
+                         * check permissions at attach time.
+                         */
+                        return -EPERM;
+
+                ptype = attach_type_to_prog_type(attach_type);
+                if (prog->type != ptype)
+                        return -EINVAL;
+
+                return prog->enforce_expected_attach_type &&
+                        prog->expected_attach_type != attach_type ?
+                        -EINVAL : 0;
+        case BPF_PROG_TYPE_EXT:
+                return 0;
+        case BPF_PROG_TYPE_NETFILTER:
+                if (attach_type != BPF_NETFILTER)
+                        return -EINVAL;
+                return 0;
+        case BPF_PROG_TYPE_PERF_EVENT:
+        case BPF_PROG_TYPE_TRACEPOINT:
+                if (attach_type != BPF_PERF_EVENT)
+                        return -EINVAL;
+                return 0;
+        case BPF_PROG_TYPE_KPROBE:
+                if (prog->expected_attach_type == BPF_TRACE_KPROBE_MULTI &&
+                    attach_type != BPF_TRACE_KPROBE_MULTI)
+                        return -EINVAL;
+                if (prog->expected_attach_type == BPF_TRACE_UPROBE_MULTI &&
+                    attach_type != BPF_TRACE_UPROBE_MULTI)
+                        return -EINVAL;
+                if (attach_type != BPF_PERF_EVENT &&
+                    attach_type != BPF_TRACE_KPROBE_MULTI &&
+                    attach_type != BPF_TRACE_UPROBE_MULTI)
+                        return -EINVAL;
+                return 0;
+        case BPF_PROG_TYPE_SCHED_CLS:
+                if (attach_type != BPF_TCX_INGRESS &&
+                    attach_type != BPF_TCX_EGRESS)
+                        return -EINVAL;
+                return 0;
+        default:
+                ptype = attach_type_to_prog_type(attach_type);
+                if (ptype == BPF_PROG_TYPE_UNSPEC || ptype != prog->type)
+                        return -EINVAL;
+                return 0;
+        }
+}
 
 #define BPF_F_ATTACH_MASK \
-	(BPF_F_ALLOW_OVERRIDE | BPF_F_ALLOW_MULTI | BPF_F_REPLACE)
+         (BPF_F_ALLOW_OVERRIDE | BPF_F_ALLOW_MULTI | BPF_F_REPLACE)
+
+#define BPF_PROG_ATTACH_LAST_FIELD expected_revision
+
+#define BPF_F_ATTACH_MASK_BASE	\
+	(BPF_F_ALLOW_OVERRIDE |	\
+	 BPF_F_ALLOW_MULTI |	\
+	 BPF_F_REPLACE)
+
+#define BPF_F_ATTACH_MASK_MPROG	\
+	(BPF_F_REPLACE |	\
+	 BPF_F_BEFORE |		\
+	 BPF_F_AFTER |		\
+	 BPF_F_ID |		\
+	 BPF_F_LINK)
 
 static int bpf_prog_attach(const union bpf_attr *attr)
 {

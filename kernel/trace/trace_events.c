@@ -2602,6 +2602,14 @@ static int event_callback(const char *name, umode_t *mode, void **data,
 	return 0;
 }
 
+/* The file is incremented on creation and freeing the enable file decrements it */
+static void event_release(const char *name, void *data)
+{
+	struct trace_event_file *file = data;
+
+	event_file_put(file);
+}
+
 static int
 event_create_dir(struct eventfs_inode *parent, struct trace_event_file *file)
 {
@@ -2616,6 +2624,7 @@ event_create_dir(struct eventfs_inode *parent, struct trace_event_file *file)
 		{
 			.name		= "enable",
 			.callback	= event_callback,
+			.release	= event_release,
 		},
 		{
 			.name		= "filter",
@@ -2683,6 +2692,9 @@ event_create_dir(struct eventfs_inode *parent, struct trace_event_file *file)
 		pr_warn("Could not initialize trace point events/%s\n", name);
 		return ret;
 	}
+
+	/* Gets decremented on freeing of the "enable" file */
+	event_file_get(file);
 
 	return 0;
 }

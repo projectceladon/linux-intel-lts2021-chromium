@@ -1158,6 +1158,8 @@ DevmemXIntMapPages(DEVMEMXINT_RESERVATION *psRsrv,
 	                        "mapping offset out of range", PVRSRV_ERROR_DEVICEMEM_OUT_OF_RANGE);
 	PVR_LOG_RETURN_IF_FALSE((uiFlags & ~PVRSRV_MEMALLOCFLAGS_DEVMEMX_VIRTUAL_MASK) == 0,
 	                        "invalid flags", PVRSRV_ERROR_INVALID_FLAGS);
+	PVR_LOG_RETURN_IF_FALSE(!PMR_IsSparse(psPMR),
+		                    "PMR is Sparse, devmemx PMRs should be non-sparse", PVRSRV_ERROR_INVALID_FLAGS);
 
 	if (uiLog2PageSize > PMR_GetLog2Contiguity(psPMR))
 	{
@@ -1319,7 +1321,7 @@ DevmemIntMapPMR2(DEVMEMINT_HEAP *psDevmemHeap,
 
 	if (!DevmemIntReservationAcquireUnlocked(psReservation))
 	{
-		PVR_GOTO_WITH_ERROR(eError, PVRSRV_ERROR_REFCOUNT_OVERFLOW, ErrorReturnError);
+		PVR_GOTO_WITH_ERROR(eError, PVRSRV_ERROR_REFCOUNT_OVERFLOW, ErrorReleaseResLock);
 	}
 
 	uiAllocationSize = psReservation->uiLength;
@@ -1329,6 +1331,13 @@ DevmemIntMapPMR2(DEVMEMINT_HEAP *psDevmemHeap,
 
 	eError = PMRLockSysPhysAddresses(psPMR);
 	PVR_GOTO_IF_ERROR(eError, ErrorUnreference);
+
+	PMRLockPMR(psPMR);
+
+	/* Increase reservation association count so we know if multiple mappings have been created
+	 * on the PMR
+	 */
+	PMRGpuResCountIncr(psPMR);
 
 	sAllocationDevVAddr = psReservation->sBase;
 
@@ -1432,6 +1441,7 @@ DevmemIntMapPMR2(DEVMEMINT_HEAP *psDevmemHeap,
 
 	psReservation->psMappedPMR = psPMR;
 
+	PMRUnlockPMR(psPMR);
 	OSLockRelease(psReservation->hLock);
 
 	return PVRSRV_OK;
@@ -1458,6 +1468,9 @@ ErrorFreeDefBackingPage:
 		                            pszPageName);
 	}
 ErrorUnlockPhysAddr:
+	PMRGpuResCountDecr(psPMR);
+	PMRUnlockPMR(psPMR);
+
 	{
 		PVRSRV_ERROR eError1 = PVRSRV_OK;
 		eError1 = PMRUnlockSysPhysAddresses(psPMR);
@@ -1468,6 +1481,7 @@ ErrorUnreference:
 	/* if fails there's not much to do (the function will print an error) */
 	DevmemIntReservationReleaseUnlocked(psReservation);
 
+ErrorReleaseResLock:
 	OSLockRelease(psReservation->hLock);
 
 ErrorReturnError:
@@ -1535,6 +1549,8 @@ DevmemIntUnmapPMR2(DEVMEMINT_RESERVATION2 *psReservation)
 	sAllocationDevVAddr = psReservation->sBase;
 
 	OSLockAcquire(psReservation->hLock);
+	PMRLockPMR(psReservation->psMappedPMR);
+
 	bIsSparse = PMR_IsSparse(psReservation->psMappedPMR);
 
 	if (bIsSparse)
@@ -1589,6 +1605,10 @@ DevmemIntUnmapPMR2(DEVMEMINT_RESERVATION2 *psReservation)
 		PVR_LOG_GOTO_IF_ERROR(eError, "MMU_UnmapPMRFast", ErrUnlock);
 	}
 
+	PMRGpuResCountDecr(psReservation->psMappedPMR);
+
+	PMRUnlockPMR(psReservation->psMappedPMR);
+
 	eError = PMRUnlockSysPhysAddresses(psReservation->psMappedPMR);
 	PVR_ASSERT(eError == PVRSRV_OK);
 
@@ -1601,6 +1621,7 @@ DevmemIntUnmapPMR2(DEVMEMINT_RESERVATION2 *psReservation)
 	return PVRSRV_OK;
 
 ErrUnlock:
+	PMRUnlockPMR(psReservation->psMappedPMR);
 	OSLockRelease(psReservation->hLock);
 
 	return eError;
@@ -1978,6 +1999,18 @@ DevmemIntChangeSparse2(DEVMEMINT_HEAP *psDevmemHeap,
 
 	OSLockAcquire(psReservation->hLock);
 
+	PMRLockPMR(psPMR);
+
+	if (PMR_IsGpuMultiMapped(psPMR))
+	{
+		PVR_DPF((PVR_DBG_ERROR,
+		         "%s: PMR cannot be changed because PMR_IsGpuMultiMapped() = true",
+		         __func__));
+		PVR_GOTO_WITH_ERROR(eError,
+		                    PVRSRV_ERROR_PMR_NOT_PERMITTED,
+		                    e0);
+	}
+
 	/*
 	 * The order of steps in which this request is done is given below. The order of
 	 * operations is very important in this case:
@@ -2137,12 +2170,12 @@ DevmemIntChangeSparse2(DEVMEMINT_HEAP *psDevmemHeap,
 		}
 
 		/* Do the PMR specific changes */
-		eError = PMR_ChangeSparseMem(psPMR,
-		                             ui32AllocPageCount,
-		                             pai32AllocIndices,
-		                             ui32FreePageCount,
-		                             pai32FreeIndices,
-		                             uiSparseFlags);
+		eError = PMR_ChangeSparseMemUnlocked(psPMR,
+		                                     ui32AllocPageCount,
+		                                     pai32AllocIndices,
+		                                     ui32FreePageCount,
+		                                     pai32FreeIndices,
+		                                     uiSparseFlags);
 		if (PVRSRV_OK != eError)
 		{
 			PVR_DPF((PVR_DBG_MESSAGE,
@@ -2220,6 +2253,7 @@ e1:
 		OSFreeMem(pai32UnmapIndices);
 	}
 e0:
+	PMRUnlockPMR(psPMR);
 	OSLockRelease(psReservation->hLock);
 	return eError;
 }

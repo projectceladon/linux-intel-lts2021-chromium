@@ -178,6 +178,12 @@ struct _PMR_
 	 */
 	ATOMIC_T iCpuMapCount;
 
+	/* Count of how many reservations refer to this
+	 * PMR as a part of a GPU mapping. Must be protected
+	 * by PMR lock.
+	 */
+	IMG_INT32 iAssociatedResCount;
+
 	/* Lock count - this is the number of times PMRLockSysPhysAddresses()
 	 * has been called, less the number of PMRUnlockSysPhysAddresses()
 	 * calls. This is arguably here for debug reasons only, as the refcount
@@ -487,6 +493,7 @@ _PMRCreate(PMR_SIZE_T uiLogicalSize,
 	/* Setup the PMR */
 	OSAtomicWrite(&psPMR->iRefCount, 0);
 	OSAtomicWrite(&psPMR->iCpuMapCount, 0);
+	psPMR->iAssociatedResCount = 0;
 
 	/* If allocation is not made on demand, it will be backed now and
 	 * backing will not be removed until the PMR is destroyed, therefore
@@ -1802,12 +1809,12 @@ PMRUnrefUnlockPMR(PMR *psPMR)
 	return PVRSRV_OK;
 }
 
-#define PMR_CPUMAPCOUNT_MIN 0
-#define PMR_CPUMAPCOUNT_MAX IMG_INT32_MAX
+#define PMR_MAPCOUNT_MIN 0
+#define PMR_MAPCOUNT_MAX IMG_INT32_MAX
 void
 PMRCpuMapCountIncr(PMR *psPMR)
 {
-	if (OSAtomicAddUnless(&psPMR->iCpuMapCount, 1, PMR_CPUMAPCOUNT_MAX) == PMR_CPUMAPCOUNT_MAX)
+	if (OSAtomicAddUnless(&psPMR->iCpuMapCount, 1, PMR_MAPCOUNT_MAX) == PMR_MAPCOUNT_MAX)
 	{
 		PVR_DPF((PVR_DBG_ERROR, "%s: iCpuMapCount for PMR: @0x%p (%s) has overflowed.",
 		                        __func__,
@@ -1820,7 +1827,7 @@ PMRCpuMapCountIncr(PMR *psPMR)
 void
 PMRCpuMapCountDecr(PMR *psPMR)
 {
-	if (OSAtomicSubtractUnless(&psPMR->iCpuMapCount, 1, PMR_CPUMAPCOUNT_MIN) == PMR_CPUMAPCOUNT_MIN)
+	if (OSAtomicSubtractUnless(&psPMR->iCpuMapCount, 1, PMR_MAPCOUNT_MIN) == PMR_MAPCOUNT_MIN)
 	{
 		PVR_DPF((PVR_DBG_ERROR, "%s: iCpuMapCount (now %d) for PMR: @0x%p (%s) has underflowed.",
 		                        __func__,
@@ -1837,6 +1844,47 @@ PMR_IsCpuMapped(PMR *psPMR)
 	PVR_ASSERT(psPMR != NULL);
 
 	return (OSAtomicRead(&psPMR->iCpuMapCount) > 0);
+}
+
+void
+PMRGpuResCountIncr(PMR *psPMR)
+{
+	if (psPMR->iAssociatedResCount == PMR_MAPCOUNT_MAX)
+	{
+		PVR_DPF((PVR_DBG_ERROR, "%s: iAssociatedResCount for PMR: @0x%p (%s) has overflowed.",
+		                        __func__,
+		                        psPMR,
+		                        psPMR->szAnnotation));
+		OSWarnOn(1);
+		return;
+	}
+
+	psPMR->iAssociatedResCount++;
+}
+
+void
+PMRGpuResCountDecr(PMR *psPMR)
+{
+	if (psPMR->iAssociatedResCount == PMR_MAPCOUNT_MIN)
+	{
+		PVR_DPF((PVR_DBG_ERROR, "%s: iAssociatedResCount (now %d) for PMR: @0x%p (%s) has underflowed.",
+		                        __func__,
+		                        psPMR->iAssociatedResCount,
+		                        psPMR,
+		                        psPMR->szAnnotation));
+		OSWarnOn(1);
+		return;
+	}
+
+	psPMR->iAssociatedResCount--;
+}
+
+IMG_BOOL
+PMR_IsGpuMultiMapped(PMR *psPMR)
+{
+	PVR_ASSERT(psPMR != NULL);
+
+	return psPMR->iAssociatedResCount > 1;
 }
 
 PVRSRV_DEVICE_NODE *
@@ -2172,11 +2220,31 @@ PVRSRV_ERROR PMR_ChangeSparseMem(PMR *psPMR,
 
 	PMRLockPMR(psPMR);
 
+	eError = PMR_ChangeSparseMemUnlocked(psPMR,
+	                                     ui32AllocPageCount,
+	                                     pai32AllocIndices,
+	                                     ui32FreePageCount,
+	                                     pai32FreeIndices,
+	                                     uiSparseFlags);
+
+	PMRUnlockPMR(psPMR);
+
+	return eError;
+}
+
+PVRSRV_ERROR PMR_ChangeSparseMemUnlocked(PMR *psPMR,
+                                         IMG_UINT32 ui32AllocPageCount,
+                                         IMG_UINT32 *pai32AllocIndices,
+                                         IMG_UINT32 ui32FreePageCount,
+                                         IMG_UINT32 *pai32FreeIndices,
+                                         IMG_UINT32 uiSparseFlags)
+{
+	PVRSRV_ERROR eError;
+
 	if (!PMR_IsSparse(psPMR))
 	{
 		PVR_DPF((PVR_DBG_ERROR,
 		        "%s: Invalid non-sparse PMR", __func__));
-		PMRUnlockPMR(psPMR);
 		return PVRSRV_ERROR_PMR_NOT_PERMITTED;
 	}
 
@@ -2187,7 +2255,6 @@ PVRSRV_ERROR PMR_ChangeSparseMem(PMR *psPMR,
 				__func__,
 				psPMR->bNoLayoutChange ? 'Y' : 'n',
 				PMR_IsCpuMapped(psPMR) ? 'Y' : 'n'));
-		PMRUnlockPMR(psPMR);
 		return PVRSRV_ERROR_PMR_NOT_PERMITTED;
 	}
 
@@ -2196,7 +2263,6 @@ PVRSRV_ERROR PMR_ChangeSparseMem(PMR *psPMR,
 		PVR_DPF((PVR_DBG_ERROR,
 				"%s: This type of sparse PMR cannot be changed.",
 				__func__));
-		PMRUnlockPMR(psPMR);
 		return PVRSRV_ERROR_NOT_IMPLEMENTED;
 	}
 
@@ -2248,7 +2314,6 @@ PVRSRV_ERROR PMR_ChangeSparseMem(PMR *psPMR,
 #endif
 
 e0:
-	PMRUnlockPMR(psPMR);
 	return eError;
 }
 

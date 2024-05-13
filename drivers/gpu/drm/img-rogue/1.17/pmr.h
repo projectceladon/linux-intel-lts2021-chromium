@@ -570,6 +570,34 @@ PMRCpuMapCountDecr(PMR *psPMR);
 IMG_BOOL
 PMR_IsCpuMapped(PMR *psPMR);
 
+/*
+ * PMRGpuResCountIncr()
+ *
+ * Increment count of the number of current GPU reservations associated with the PMR.
+ * Must be protected by PMR lock.
+ */
+void
+PMRGpuResCountIncr(PMR *psPMR);
+
+/*
+ * PMRGpuResCountDecr()
+ *
+ * Decrement count of the number of current GPU reservations associated with the PMR.
+ * Must be protected by PMR lock.
+ *
+ */
+void
+PMRGpuResCountDecr(PMR *psPMR);
+
+/*
+ * PMR_IsGpuMultiMapped()
+ *
+ * Must be protected by PMR lock.
+ *
+ */
+IMG_BOOL
+PMR_IsGpuMultiMapped(PMR *psPMR);
+
 PPVRSRV_DEVICE_NODE
 PMR_DeviceNode(const PMR *psPMR);
 
@@ -725,8 +753,26 @@ PVRSRV_ERROR PMR_ChangeSparseMemCPUMap(PMR *psPMR,
                                        IMG_UINT32 ui32FreePageCount,
                                        IMG_UINT32 *pai32FreeIndices);
 
-#if defined(PDUMP)
 
+
+/*
+ * PMR_ChangeSparseMemUnlocked()
+ *
+ * See note above about Lock/Unlock semantics.
+ *
+ * This function alters the memory map of the given PMR in device space by
+ * adding/deleting the pages as requested. PMR lock must be taken
+ * before calling this function.
+ *
+ */
+PVRSRV_ERROR PMR_ChangeSparseMemUnlocked(PMR *psPMR,
+                                 IMG_UINT32 ui32AllocPageCount,
+                                 IMG_UINT32 *pai32AllocIndices,
+                                 IMG_UINT32 ui32FreePageCount,
+                                 IMG_UINT32 *pai32FreeIndices,
+                                 IMG_UINT32 uiSparseFlags);
+
+#if defined(PDUMP)
 /*
  * PMR_PDumpSymbolicAddr()
  *

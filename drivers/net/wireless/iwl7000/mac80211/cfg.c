@@ -1652,8 +1652,15 @@ static void sta_apply_mesh_params(struct ieee80211_local *local,
 #endif
 }
 
+enum sta_link_apply_mode {
+	STA_LINK_MODE_NEW,
+	STA_LINK_MODE_STA_MODIFY,
+	STA_LINK_MODE_LINK_MODIFY,
+};
+
 static int sta_link_apply_parameters(struct ieee80211_local *local,
-				     struct sta_info *sta, bool new_link,
+				     struct sta_info *sta,
+				     enum sta_link_apply_mode mode,
 				     struct station_parameters *params)
 {
 	int ret = 0;
@@ -1665,6 +1672,15 @@ static int sta_link_apply_parameters(struct ieee80211_local *local,
 	struct link_sta_info *link_sta =
 		rcu_dereference_protected(sta->link[link_id],
 					  lockdep_is_held(&local->hw.wiphy->mtx));
+
+	switch (mode) {
+	case STA_LINK_MODE_NEW:
+		break;
+	case STA_LINK_MODE_LINK_MODIFY:
+		break;
+	case STA_LINK_MODE_STA_MODIFY:
+		break;
+	}
 
 	if (!link || !link_sta)
 		return -EINVAL;
@@ -1834,7 +1850,7 @@ static int sta_apply_parameters(struct ieee80211_local *local,
 	if (params->listen_interval >= 0)
 		sta->listen_interval = params->listen_interval;
 
-	ret = sta_link_apply_parameters(local, sta, false,
+	ret = sta_link_apply_parameters(local, sta, STA_LINK_MODE_STA_MODIFY,
 					params);
 	if (ret)
 		return ret;

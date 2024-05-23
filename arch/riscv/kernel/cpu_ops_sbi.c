@@ -59,10 +59,14 @@ static int sbi_cpu_start(unsigned int cpuid, struct task_struct *tidle)
 	unsigned long boot_addr = __pa_symbol(secondary_start_sbi);
 	int hartid = cpuid_to_hartid_map(cpuid);
 
-	cpu_update_secondary_bootdata(cpuid, tidle);
-	rc = sbi_hsm_hart_start(hartid, boot_addr, 0);
-
-	return rc;
+	/* Make sure tidle is updated */
+	smp_mb();
+	bdata->task_ptr = tidle;
+	bdata->stack_ptr = task_pt_regs(tidle);
+	/* Make sure boot data is updated */
+	smp_mb();
+	hsm_data = __pa(bdata);
+	return sbi_hsm_hart_start(hartid, boot_addr, hsm_data);
 }
 
 static int sbi_cpu_prepare(unsigned int cpuid)

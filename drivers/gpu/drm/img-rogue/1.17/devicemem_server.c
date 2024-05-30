@@ -830,7 +830,7 @@ static INLINE IMG_DEV_VIRTADDR
 _DevmemXReservationPageAddress(DEVMEMXINT_RESERVATION *psRsrv, IMG_UINT32 uiVirtPageOffset)
 {
 	IMG_DEV_VIRTADDR sAddr = {
-		.uiAddr = psRsrv->sBase.uiAddr + (uiVirtPageOffset << psRsrv->psDevmemHeap->uiLog2PageSize)
+		.uiAddr = psRsrv->sBase.uiAddr + ((IMG_UINT64)uiVirtPageOffset << psRsrv->psDevmemHeap->uiLog2PageSize)
 	};
 
 	return sAddr;

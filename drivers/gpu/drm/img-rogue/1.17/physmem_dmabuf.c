@@ -181,6 +181,8 @@ typedef struct _PMR_DMA_BUF_DATA_
 	IMG_DEV_PHYADDR *pasDevPhysAddr;
 	IMG_UINT32 ui32PhysPageCount;
 	IMG_UINT32 ui32VirtPageCount;
+
+	IMG_BOOL bZombie;
 } PMR_DMA_BUF_DATA;
 
 /* Start size of the g_psDmaBufHash hash table */
@@ -330,9 +332,20 @@ static PVRSRV_ERROR PMRFinalizeDmaBuf(PMR_IMPL_PRIVDATA pvPriv)
 	}
 
 #if defined(PVRSRV_ENABLE_PROCESS_STATS)
-	PVRSRVStatsDecrMemAllocStat(PVRSRV_MEM_ALLOC_TYPE_DMA_BUF_IMPORT,
-	                            psPrivData->ui32PhysPageCount << PAGE_SHIFT,
-	                            OSGetCurrentClientProcessIDKM());
+#if defined(SUPPORT_PMR_DEFERRED_FREE)
+	if (psPrivData->bZombie)
+	{
+		PVRSRVStatsDecrMemAllocStat(PVRSRV_MEM_ALLOC_TYPE_DMA_BUF_ZOMBIE,
+		                            psPrivData->ui32PhysPageCount << PAGE_SHIFT,
+		                            OSGetCurrentClientProcessIDKM());
+	}
+	else
+#endif
+	{
+		PVRSRVStatsDecrMemAllocStat(PVRSRV_MEM_ALLOC_TYPE_DMA_BUF_IMPORT,
+		                            psPrivData->ui32PhysPageCount << PAGE_SHIFT,
+		                            OSGetCurrentClientProcessIDKM());
+	}
 #endif
 
 	psPrivData->ui32PhysPageCount = 0;
@@ -367,6 +380,34 @@ static PVRSRV_ERROR PMRFinalizeDmaBuf(PMR_IMPL_PRIVDATA pvPriv)
 
 	return PVRSRV_OK;
 }
+
+#if defined(SUPPORT_PMR_DEFERRED_FREE)
+static PVRSRV_ERROR PMRZombifyDmaBufMem(PMR_IMPL_PRIVDATA pvPriv, PMR *psPMR)
+{
+	PMR_DMA_BUF_DATA *psPrivData = pvPriv;
+	struct dma_buf_attachment *psAttachment = psPrivData->psAttachment;
+	struct dma_buf *psDmaBuf = psAttachment->dmabuf;
+
+	PVR_UNREFERENCED_PARAMETER(psPMR);
+
+	psPrivData->bZombie = IMG_TRUE;
+
+#if defined(PVRSRV_ENABLE_PROCESS_STATS)
+	PVRSRVStatsDecrMemAllocStat(PVRSRV_MEM_ALLOC_TYPE_DMA_BUF_IMPORT,
+	                            psPrivData->ui32PhysPageCount << PAGE_SHIFT,
+	                            OSGetCurrentClientProcessIDKM());
+	PVRSRVStatsIncrMemAllocStat(PVRSRV_MEM_ALLOC_TYPE_DMA_BUF_ZOMBIE,
+	                            psPrivData->ui32PhysPageCount << PAGE_SHIFT,
+	                            OSGetCurrentClientProcessIDKM());
+#else
+	PVR_UNREFERENCED_PARAMETER(pvPriv);
+#endif
+
+	PVRSRVIonZombifyMemAllocRecord(psDmaBuf);
+
+	return PVRSRV_OK;
+}
+#endif /* defined(SUPPORT_PMR_DEFERRED_FREE) */
 
 static PVRSRV_ERROR PMRLockPhysAddressesDmaBuf(PMR_IMPL_PRIVDATA pvPriv)
 {
@@ -521,15 +562,18 @@ static PVRSRV_ERROR PMRMMapDmaBuf(PMR_IMPL_PRIVDATA pvPriv,
 
 static PMR_IMPL_FUNCTAB _sPMRDmaBufFuncTab =
 {
-	.pfnLockPhysAddresses		= PMRLockPhysAddressesDmaBuf,
-	.pfnUnlockPhysAddresses		= PMRUnlockPhysAddressesDmaBuf,
-	.pfnDevPhysAddr			= PMRDevPhysAddrDmaBuf,
-	.pfnAcquireKernelMappingData	= PMRAcquireKernelMappingDataDmaBuf,
-	.pfnReleaseKernelMappingData	= PMRReleaseKernelMappingDataDmaBuf,
-	.pfnMMap			= PMRMMapDmaBuf,
-	.pfnFinalize			= PMRFinalizeDmaBuf,
+	.pfnLockPhysAddresses = PMRLockPhysAddressesDmaBuf,
+	.pfnUnlockPhysAddresses = PMRUnlockPhysAddressesDmaBuf,
+	.pfnDevPhysAddr = PMRDevPhysAddrDmaBuf,
+	.pfnAcquireKernelMappingData = PMRAcquireKernelMappingDataDmaBuf,
+	.pfnReleaseKernelMappingData = PMRReleaseKernelMappingDataDmaBuf,
+	.pfnMMap = PMRMMapDmaBuf,
+	.pfnFinalize = PMRFinalizeDmaBuf,
 	.pfnGetPMRFactoryLock = PMRGetFactoryLock,
 	.pfnReleasePMRFactoryLock = PMRReleaseFactoryLock,
+#if defined(SUPPORT_PMR_DEFERRED_FREE)
+	.pfnZombify = PMRZombifyDmaBufMem,
+#endif
 };
 
 /*****************************************************************************
@@ -865,8 +909,8 @@ fail_dma_buf:
 	return eError;
 
 fail_pmr_ref:
-	mutex_unlock(&g_HashLock);
 	PMRUnrefPMR(psPMR);
+	mutex_unlock(&g_HashLock);
 
 	PVR_ASSERT(eError != PVRSRV_OK);
 	return eError;
@@ -1050,8 +1094,17 @@ PhysmemImportSparseDmaBuf(CONNECTION_DATA *psConnection,
 
 	if (psPMR)
 	{
-		/* Reuse the PMR we already created */
-		PMRRefPMR(psPMR);
+#if defined(SUPPORT_PMR_DEFERRED_FREE)
+		if (PMR_IsZombie(psPMR))
+		{
+			PMRDequeueZombieAndRef(psPMR);
+		}
+		else
+#endif /* defined(SUPPORT_PMR_DEFERRED_FREE) */
+		{
+			/* Reuse the PMR we already created */
+			PMRRefPMR(psPMR);
+		}
 
 		*ppsPMRPtr = psPMR;
 		PMR_LogicalSize(psPMR, puiSize);

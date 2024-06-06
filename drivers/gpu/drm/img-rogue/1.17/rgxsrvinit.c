@@ -1451,28 +1451,6 @@ PVRSRV_ERROR RGXInit(PVRSRV_DEVICE_NODE *psDeviceNode)
 
 	RGXInitMultiCoreInfo(psDeviceNode);
 
-	eError = DevmemIntAllocDefBackingPage(psDeviceNode,
-	                                      &psDeviceNode->sDummyPage,
-	                                      PVR_DUMMY_PAGE_INIT_VALUE,
-	                                      DUMMY_PAGE,
-	                                      IMG_TRUE);
-	if (eError != PVRSRV_OK)
-	{
-		PVR_DPF((PVR_DBG_ERROR, "%s: Failed to allocate dummy page.", __func__));
-		goto cleanup;
-	}
-
-	eError = DevmemIntAllocDefBackingPage(psDeviceNode,
-	                                      &psDeviceNode->sDevZeroPage,
-	                                      PVR_ZERO_PAGE_INIT_VALUE,
-	                                      DEV_ZERO_PAGE,
-	                                      IMG_TRUE);
-	if (eError != PVRSRV_OK)
-	{
-		PVR_DPF((PVR_DBG_ERROR, "%s: Failed to allocate Zero page.", __func__));
-		goto cleanup;
-	}
-
 	sLayerParams.psDevInfo = psDevInfo;
 #if defined(SUPPORT_TRUSTED_DEVICE)
 	eError = RGXValidateTDHeaps(psDeviceNode);

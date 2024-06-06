@@ -1083,6 +1083,8 @@ DevmemXIntMapPages(DEVMEMXINT_RESERVATION *psRsrv,
 	                        "invalid flags", PVRSRV_ERROR_INVALID_FLAGS);
 	PVR_LOG_RETURN_IF_FALSE(!PMR_IsSparse(psPMR),
 		                    "PMR is Sparse, devmemx PMRs should be non-sparse", PVRSRV_ERROR_INVALID_FLAGS);
+	PVR_LOG_RETURN_IF_FALSE(!(PMR_Flags(psPMR) & PVRSRV_MEMALLOCFLAG_NO_OSPAGES_ON_ALLOC),
+		                    "PMR allocation is deferred, devmemx PMRs can not be deferred", PVRSRV_ERROR_INVALID_FLAGS);
 
 	if (uiLog2PageSize > PMR_GetLog2Contiguity(psPMR))
 	{

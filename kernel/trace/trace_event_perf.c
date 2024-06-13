@@ -401,7 +401,8 @@ void *perf_trace_buf_alloc(int size, struct pt_regs **regs, int *rctxp)
 	BUILD_BUG_ON(PERF_MAX_TRACE_SIZE % sizeof(unsigned long));
 
 	if (WARN_ONCE(size > PERF_MAX_TRACE_SIZE,
-		      "perf buffer not large enough"))
+		      "perf buffer not large enough, wanted %d, have %d",
+		      size, PERF_MAX_TRACE_SIZE))
 		return NULL;
 
 	*rctxp = rctx = perf_swevent_get_recursion_context();
@@ -423,7 +424,7 @@ void perf_trace_buf_update(void *record, u16 type)
 {
 	struct trace_entry *entry = record;
 
-	tracing_generic_entry_update(entry, type, tracing_gen_ctx());
+	tracing_generic_entry_update(entry, type, 0, tracing_gen_ctx());
 }
 NOKPROBE_SYMBOL(perf_trace_buf_update);
 

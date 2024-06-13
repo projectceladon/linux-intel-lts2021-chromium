@@ -62,7 +62,7 @@ int cam_context_shutdown(struct cam_context *ctx)
 		rc = -EINVAL;
 	}
 
-	rc = cam_destroy_device_hdl(ctx->dev_hdl);
+	rc = cam_destroy_device_ctx_hdl(ctx->dev_hdl);
 	if (rc)
 		CAM_ERR(CAM_CORE, "destroy device hdl failed for node %s",
 			ctx->dev_name);
@@ -257,17 +257,23 @@ int cam_context_handle_crm_dump_req(struct cam_context *ctx,
 	return rc;
 }
 
+/*
+ * Unlike other cam_context functions, this one is not an IOCTL, so we don't
+ * take ->ctx_mutex here. This function is called from pagefault callback
+ * (e.g. IOMMU fault), which runs in atomic context.
+ */
 int cam_context_dump_pf_info(struct cam_context *ctx, unsigned long iova,
 	uint32_t buf_info)
 {
 	int rc = 0;
+
+	WARN_ON_ONCE(preemptible());
 
 	if (!ctx->state_machine) {
 		CAM_ERR(CAM_CORE, "Context is not ready");
 		return -EINVAL;
 	}
 
-	mutex_lock(&ctx->ctx_mutex);
 	if (ctx->state_machine[ctx->state].pagefault_ops) {
 		rc = ctx->state_machine[ctx->state].pagefault_ops(ctx, iova,
 			buf_info);
@@ -275,7 +281,6 @@ int cam_context_dump_pf_info(struct cam_context *ctx, unsigned long iova,
 		CAM_INFO(CAM_CORE, "No dump ctx in dev %d, state %d",
 			ctx->dev_hdl, ctx->state);
 	}
-	mutex_unlock(&ctx->ctx_mutex);
 
 	return rc;
 }
@@ -578,7 +583,7 @@ int cam_context_init(struct cam_context *ctx,
 	mutex_init(&ctx->sync_mutex);
 	spin_lock_init(&ctx->lock);
 
-	strlcpy(ctx->dev_name, dev_name, CAM_CTX_DEV_NAME_MAX_LENGTH);
+	ctx->dev_name = dev_name;
 	ctx->dev_id = dev_id;
 	ctx->ctx_id = ctx_id;
 	ctx->last_flush_req = 0;

@@ -9,6 +9,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/pci.h>
+#include <linux/pci-ats.h>
 #include <linux/pm_qos.h>
 #include <linux/pm_runtime.h>
 #include <linux/timer.h>
@@ -315,6 +316,11 @@ static int ipu_pci_config_setup(struct pci_dev *dev)
 	pci_command |= PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER;
 	pci_write_config_word(dev, PCI_COMMAND, pci_command);
 
+	/* disable IPU6 PCI ATS on mtl ES2 */
+	if (ipu_ver == IPU_VER_6EP_MTL && boot_cpu_data.x86_stepping == 0x2
+	    && pci_ats_supported(dev))
+		pci_disable_ats(dev);
+
 	/* no msi pci capability for IPU6EP */
 	if (ipu_ver == IPU_VER_6EP || ipu_ver == IPU_VER_6EP_MTL) {
 		/* likely do nothing as msi not enabled by default */
@@ -443,23 +449,31 @@ static int ipu_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	case IPU6_PCI_ID:
 		ipu_ver = IPU_VER_6;
 		isp->cpd_fw_name = IPU6_FIRMWARE_NAME;
+		isp->cpd_fw_name_new = IPU6_FIRMWARE_NAME_NEW;
 		break;
 	case IPU6SE_PCI_ID:
 		ipu_ver = IPU_VER_6SE;
 		isp->cpd_fw_name = IPU6SE_FIRMWARE_NAME;
+		isp->cpd_fw_name_new = IPU6SE_FIRMWARE_NAME_NEW;
 		break;
 	case IPU6EP_ADL_P_PCI_ID:
 	case IPU6EP_RPL_P_PCI_ID:
 		ipu_ver = IPU_VER_6EP;
 		isp->cpd_fw_name = is_es ? IPU6EPES_FIRMWARE_NAME : IPU6EP_FIRMWARE_NAME;
+		isp->cpd_fw_name_new = is_es ? IPU6EPES_FIRMWARE_NAME_NEW
+					     : IPU6EP_FIRMWARE_NAME_NEW;
 		break;
 	case IPU6EP_ADL_N_PCI_ID:
 		ipu_ver = IPU_VER_6EP;
 		isp->cpd_fw_name = IPU6EPADLN_FIRMWARE_NAME;
+		isp->cpd_fw_name_new = IPU6EPADLN_FIRMWARE_NAME_NEW;
 		break;
 	case IPU6EP_MTL_PCI_ID:
 		ipu_ver = IPU_VER_6EP_MTL;
-		isp->cpd_fw_name = IPU6EPMTL_FIRMWARE_NAME;
+		isp->cpd_fw_name = is_es ? IPU6EPMTLES_FIRMWARE_NAME
+					 : IPU6EPMTL_FIRMWARE_NAME;
+		isp->cpd_fw_name_new = is_es ? IPU6EPMTLES_FIRMWARE_NAME_NEW
+					     : IPU6EPMTL_FIRMWARE_NAME_NEW;
 		break;
 	default:
 		WARN(1, "Unsupported IPU device");
@@ -499,12 +513,19 @@ static int ipu_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (rval)
 		return rval;
 
-	dev_info(&pdev->dev, "cpd file name: %s\n", isp->cpd_fw_name);
-
+	dev_dbg(&pdev->dev, "cpd file name: %s\n", isp->cpd_fw_name);
 	rval = request_cpd_fw(&isp->cpd_fw, isp->cpd_fw_name, &pdev->dev);
+	if (rval == -ENOENT) {
+		/* Try again with new FW path */
+		dev_dbg(&pdev->dev, "cpd file name: %s\n",
+			isp->cpd_fw_name_new);
+		rval = request_cpd_fw(&isp->cpd_fw, isp->cpd_fw_name_new,
+				      &pdev->dev);
+	}
+
 	if (rval) {
 		dev_err(&isp->pdev->dev, "Requesting signed firmware failed\n");
-		return rval;
+		goto buttress_exit;
 	}
 
 	rval = ipu_cpd_validate_cpd_file(isp, isp->cpd_fw->data,
@@ -642,8 +663,9 @@ out_ipu_bus_del_devices:
 	if (!IS_ERR_OR_NULL(isp->psys))
 		pm_runtime_put(&isp->psys->dev);
 	ipu_bus_del_devices(pdev);
-	ipu_buttress_exit(isp);
 	release_firmware(isp->cpd_fw);
+buttress_exit:
+	ipu_buttress_exit(isp);
 
 	return rval;
 }
@@ -666,20 +688,17 @@ static void ipu_pci_remove(struct pci_dev *pdev)
 	isp->pkg_dir_dma_addr = 0;
 	isp->pkg_dir_size = 0;
 
+	ipu_mmu_cleanup(isp->psys->mmu);
+	ipu_mmu_cleanup(isp->isys->mmu);
+
 	ipu_bus_del_devices(pdev);
 
 	pm_runtime_forbid(&pdev->dev);
 	pm_runtime_get_noresume(&pdev->dev);
 
-	pci_release_regions(pdev);
-	pci_disable_device(pdev);
-
 	ipu_buttress_exit(isp);
 
 	release_firmware(isp->cpd_fw);
-
-	ipu_mmu_cleanup(isp->psys->mmu);
-	ipu_mmu_cleanup(isp->isys->mmu);
 }
 
 static void ipu_pci_reset_prepare(struct pci_dev *pdev)

@@ -2960,6 +2960,101 @@ exit_ok:
 	return PVRSRV_OK;
 }
 
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+static PVRSRV_ERROR PMRFreeZombiePagesOSMem(PMR_IMPL_ZOMBIEPAGES pvPriv)
+{
+	PVRSRV_ERROR eError;
+	PMR_OSPAGEARRAY_DATA *psZombiePageArray = pvPriv;
+
+	eError = _FreeOSPages(psZombiePageArray,
+	                      NULL,
+	                      0 /* Unused */);
+
+	if (eError != PVRSRV_OK)
+	{
+		goto e0;
+	}
+
+	_FreeOSPagesArray(psZombiePageArray);
+
+	return PVRSRV_OK;
+e0:
+	return eError;
+}
+
+/* Extracts ui32ExtractPageCount of pages referenced in pai32ExtractIndices from the psSrcPageArrayData
+ * Allocates a new PMR_OSPAGEARRAY_DATA object and fills it with the extracted pages information.
+ * Pages in this context are dev page size and are handled as such.
+ */
+static PVRSRV_ERROR
+_ExtractPages(PMR_OSPAGEARRAY_DATA *psSrcPageArrayData,
+			  IMG_UINT32 *pai32ExtractIndices,
+			  IMG_UINT32 ui32ExtractPageCount,
+			  PMR_OSPAGEARRAY_DATA** psOutPageArrayData)
+{
+	PVRSRV_ERROR eError;
+	IMG_UINT32 i;
+	PMR_OSPAGEARRAY_DATA* psDstPageArrayData;
+	IMG_UINT32 uiOrder;
+
+	/* Alloc PMR_OSPAGEARRAY_DATA for the extracted pages */
+	eError = _AllocOSPageArray(psSrcPageArrayData->psDevNode,
+	                           1ULL << psSrcPageArrayData->uiLog2AllocPageSize,
+	                           ui32ExtractPageCount,
+	                           ui32ExtractPageCount,
+	                           psSrcPageArrayData->uiLog2AllocPageSize,
+	                           psSrcPageArrayData->ui32AllocFlags,
+	                           psSrcPageArrayData->ui32CPUCacheFlags,
+	                           psSrcPageArrayData->uiPid,
+	                           &psDstPageArrayData);
+	if (eError != PVRSRV_OK)
+	{
+		PVR_DPF((PVR_DBG_ERROR, "_AllocOSPageArray failed in _ExtractPages"));
+		return eError;
+	}
+
+	uiOrder = psSrcPageArrayData->uiLog2AllocPageSize - PAGE_SHIFT;
+
+	/* Transfer from src pagearray to dst pagearray */
+	for (i = 0; i < ui32ExtractPageCount; i++)
+	{
+		IMG_UINT32 idxSrc = pai32ExtractIndices[i];
+
+		if (psSrcPageArrayData->pagearray[idxSrc] != NULL)
+		{
+			psDstPageArrayData->pagearray[i] = psSrcPageArrayData->pagearray[idxSrc];
+			psSrcPageArrayData->pagearray[idxSrc] = NULL;
+		}
+	}
+
+	/* Do the same for dmaphysarray and dmavirtarray if allocated with CMA */
+	if (BIT_ISSET(psSrcPageArrayData->ui32AllocFlags, FLAG_IS_CMA))
+	{
+		for (i = 0; i < ui32ExtractPageCount; i++)
+		{
+			IMG_UINT32 idxSrc = pai32ExtractIndices[i];
+
+			if (psSrcPageArrayData->dmaphysarray[idxSrc] != (dma_addr_t)0 ||
+			    psSrcPageArrayData->dmavirtarray[idxSrc] != NULL)
+			{
+				psDstPageArrayData->dmaphysarray[i] = psSrcPageArrayData->dmaphysarray[idxSrc];
+				psDstPageArrayData->dmavirtarray[i] = psSrcPageArrayData->dmavirtarray[idxSrc];
+
+				psSrcPageArrayData->dmaphysarray[idxSrc] = (dma_addr_t)0;
+				psSrcPageArrayData->dmavirtarray[idxSrc] = NULL;
+			}
+		}
+	}
+
+	/* Update page counts */
+	psSrcPageArrayData->iNumOSPagesAllocated -= ui32ExtractPageCount << uiOrder;
+	psDstPageArrayData->iNumOSPagesAllocated += ui32ExtractPageCount << uiOrder;
+
+	*psOutPageArrayData = psDstPageArrayData;
+	return PVRSRV_OK;
+}
+#endif /* defined(SUPPORT_PMR_PAGES_DEFERRED_FREE) */
+
 /* Free pages from a page array.
  * Takes care of mem stats and chooses correct free path depending on parameters. */
 static PVRSRV_ERROR
@@ -3570,6 +3665,9 @@ PMRChangeSparseMemOSMem(PMR_IMPL_PRIVDATA pPriv,
 						IMG_UINT32 *pai32AllocIndices,
 						IMG_UINT32 ui32FreePageCount,
 						IMG_UINT32 *pai32FreeIndices,
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+						PMR_IMPL_ZOMBIEPAGES ppsZombiePages,
+#endif
 						IMG_UINT32 uiFlags)
 {
 	PVRSRV_ERROR eError;
@@ -3621,6 +3719,10 @@ PMRChangeSparseMemOSMem(PMR_IMPL_PRIVDATA pPriv,
 	{
 		ui32FreePageCount = 0;
 	}
+
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+	*((PMR_OSPAGEARRAY_DATA**)ppsZombiePages) = NULL;
+#endif
 
 	if (0 == (ui32CommonRequestCount || ui32AdtnlAllocPages || ui32AdtnlFreePages))
 	{
@@ -3757,9 +3859,27 @@ PMRChangeSparseMemOSMem(PMR_IMPL_PRIVDATA pPriv,
 		}
 	}
 
-	/* Free the additional free pages */
+	/* Free or zombie the additional free pages */
 	if (0 != ui32AdtnlFreePages)
 	{
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+		PMR_OSPAGEARRAY_DATA *psExtractedPagesPageArray = NULL;
+
+		eError = _ExtractPages(psPMRPageArrayData,
+		                       &pai32FreeIndices[ui32Loop],
+		                       ui32AdtnlFreePages,
+		                       &psExtractedPagesPageArray);
+		if (eError != PVRSRV_OK)
+		{
+			goto e0;
+		}
+
+		/* Zombify pages to get proper stats */
+		eError = PMRZombifyOSMem(psExtractedPagesPageArray, NULL);
+		PVR_LOG_IF_ERROR(eError, "psExtractedPagesPageArray");
+
+		*((PMR_OSPAGEARRAY_DATA**)ppsZombiePages) = psExtractedPagesPageArray;
+#else
 		eError = _FreeOSPages(psPMRPageArrayData,
 		                      &pai32FreeIndices[ui32Loop],
 		                      ui32AdtnlFreePages);
@@ -3767,6 +3887,7 @@ PMRChangeSparseMemOSMem(PMR_IMPL_PRIVDATA pPriv,
 		{
 			goto e0;
 		}
+#endif /* SUPPORT_PMR_PAGES_DEFERRED_FREE */
 		psPMRMapTable->ui32NumPhysChunks -= ui32AdtnlFreePages;
 		while (ui32Loop < ui32FreePageCount)
 		{
@@ -3825,6 +3946,9 @@ static PMR_IMPL_FUNCTAB _sPMROSPFuncTab = {
 	.pfnChangeSparseMem = &PMRChangeSparseMemOSMem,
 	.pfnChangeSparseMemCPUMap = &PMRChangeSparseMemCPUMapOSMem,
 	.pfnFinalize = &PMRFinalizeOSMem,
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+	.pfnFreeZombiePages = &PMRFreeZombiePagesOSMem,
+#endif
 #if defined(SUPPORT_PMR_DEFERRED_FREE)
 	.pfnZombify = &PMRZombifyOSMem,
 #endif

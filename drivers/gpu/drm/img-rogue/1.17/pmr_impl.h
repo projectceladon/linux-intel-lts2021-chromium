@@ -79,6 +79,10 @@ typedef struct _PMR_MAPPING_TABLE_ PMR_MAPPING_TABLE;
  */
 typedef void *PMR_MMAP_DATA;
 
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+typedef void *PMR_IMPL_ZOMBIEPAGES;
+#endif
+
 #define PMR_IMPL_TYPES \
 	X(NONE), \
 	X(OSMEM), \
@@ -368,6 +372,9 @@ typedef PVRSRV_ERROR (*PFN_PIN_MEM_FN)(PMR_IMPL_PRIVDATA pPriv,
                                       allocation that do not require
                                       a physical allocation.
 @Input          ui32Flags             Allocation flags
+@Output         pZombiePages          Zombie pages object. If non-null is returned
+                                      caller is obligated to call pfnFreeZombiePages
+                                      at an appropriate time to prevent memory leaks
 
 @Return         PVRSRV_OK if the sparse allocation physical backing was updated
                 successfully, an error code otherwise.
@@ -378,6 +385,9 @@ typedef PVRSRV_ERROR (*PFN_CHANGE_SPARSE_MEM_FN)(PMR_IMPL_PRIVDATA pPriv,
                       IMG_UINT32 *pai32AllocIndices,
                       IMG_UINT32 ui32FreePageCount,
                       IMG_UINT32 *pai32FreeIndices,
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+                      PMR_IMPL_ZOMBIEPAGES pZombiePages,
+#endif
                       IMG_UINT32 uiFlags);
 
 /*************************************************************************/ /*!
@@ -515,6 +525,29 @@ typedef PVRSRV_ERROR (*PFN_ZOMBIFY_FN)(PMR_IMPL_PRIVDATA pvPriv,
                                        PMR *psPMR);
 #endif
 
+#ifdef SUPPORT_PMR_PAGES_DEFERRED_FREE
+/*************************************************************************/ /*!
+@Brief          Callback function type PFN_FREE_ZOMBIE_PAGES_FN
+
+@Description    Called to perform factory actions to free zombie pages object
+                previously returned by PFN_CHANGE_SPARSE_MEM_FN.
+
+                This function should free the pages described in the
+                pvZombiePages parameter and do any associated actions related
+                to freeing such as poisoning or returning to the page pool.
+
+                Implementation of this callback is required when
+                SUPPORT_PMR_PAGES_DEFERRED_FREE=1.
+
+@Return         PVRSRV_OK if the operation was successful, an error code
+                otherwise. If error is returned, the PMR layer might retry.
+                On error, factory implementations should modify the contents
+                of the PMR_IMPL_ZOMBIEPAGES object reflecting any changes in
+                underlying memory as a result of the initial (failed) call.
+*/ /**************************************************************************/
+typedef PVRSRV_ERROR (*PFN_FREE_ZOMBIE_PAGES_FN)(PMR_IMPL_ZOMBIEPAGES pvZombiePages);
+#endif
+
 /*! PMR factory callback table.
  */
 struct _PMR_IMPL_FUNCTAB_ {
@@ -545,6 +578,11 @@ struct _PMR_IMPL_FUNCTAB_ {
     PFN_CHANGE_SPARSE_MEM_FN pfnChangeSparseMem;
     /*! Callback function pointer, see ::PFN_CHANGE_SPARSE_MEM_CPU_MAP_FN */
     PFN_CHANGE_SPARSE_MEM_CPU_MAP_FN pfnChangeSparseMemCPUMap;
+
+#ifdef SUPPORT_PMR_PAGES_DEFERRED_FREE
+    /*! Callback function pointer, see ::PFN_FREE_ZOMBIE_PAGES_FN */
+    PFN_FREE_ZOMBIE_PAGES_FN pfnFreeZombiePages;
+#endif
 
     /*! Callback function pointer, see ::PFN_MMAP_FN */
     PFN_MMAP_FN pfnMMap;

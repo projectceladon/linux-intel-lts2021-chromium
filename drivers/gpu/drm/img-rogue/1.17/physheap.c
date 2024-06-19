@@ -275,6 +275,15 @@ static void _PhysHeapDebugRequest(PVRSRV_DBGREQ_HANDLE pfnDbgRequestHandle,
 			                  ui64TotalSize);
 		}
 	}
+
+#if defined(SUPPORT_PMR_DEFERRED_FREE)
+	OSLockAcquire(psDeviceNode->hPMRZombieListLock);
+	PVR_DUMPDEBUG_LOG("PMR Zombie Count: %u, PMR Zombie Count In Cleanup: %u",
+	                  psDeviceNode->uiPMRZombieCount,
+	                  psDeviceNode->uiPMRZombieCountInCleanup);
+	OSLockRelease(psDeviceNode->hPMRZombieListLock);
+#endif
+	PVR_DUMPDEBUG_LOG("PMR Live Count: %d", PMRGetLiveCount());
 }
 
 PVRSRV_ERROR

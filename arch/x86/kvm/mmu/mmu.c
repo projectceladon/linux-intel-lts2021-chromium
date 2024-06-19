@@ -2684,8 +2684,8 @@ static int set_spte(struct kvm_vcpu *vcpu, u64 *sptep,
 
 	sp = sptep_to_sp(sptep);
 
-	ret = make_spte(vcpu, pte_access, level, gfn, pfn, *sptep, speculative,
-			can_unsync, host_writable, sp_ad_disabled(sp), &spte);
+	ret = make_spte(vcpu, kvm_vcpu_gfn_to_memslot(vcpu, gfn), pte_access, level, gfn, pfn,
+			*sptep, speculative, can_unsync, host_writable, sp_ad_disabled(sp), &spte);
 
 	if (spte & PT_WRITABLE_MASK)
 		kvm_vcpu_mark_page_dirty(vcpu, gfn);
@@ -4356,7 +4356,7 @@ static void reset_rsvds_bits_mask(struct kvm_vcpu *vcpu,
 				context->root_level, is_efer_nx(context),
 				guest_can_use_gbpages(vcpu),
 				is_cr4_pse(context),
-				guest_cpuid_is_amd_or_hygon(vcpu));
+				guest_cpuid_is_amd_compatible(vcpu));
 }
 
 static void

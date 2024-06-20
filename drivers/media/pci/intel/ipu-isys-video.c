@@ -7,7 +7,6 @@
 #include <linux/kthread.h>
 #include <linux/pm_runtime.h>
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/compat.h>
 
 #include <uapi/linux/sched/types.h>
@@ -36,6 +35,13 @@
 
 /* use max resolution pixel rate by default */
 #define DEFAULT_PIXEL_RATE	(360000000ULL * 2 * 4 / 10)
+
+#define MAX_VIDEO_DEVICES	8
+
+static int video_nr[MAX_VIDEO_DEVICES] = { [0 ...(MAX_VIDEO_DEVICES - 1)] = -1 };
+module_param_array(video_nr, int, NULL, 0444);
+MODULE_PARM_DESC(video_nr,
+		 "video device numbers (-1=auto, 0=/dev/video0, etc.)");
 
 const struct ipu_isys_pixelformat ipu_isys_pfmts_be_soc[] = {
 	{V4L2_PIX_FMT_Y10, 16, 10, 0, MEDIA_BUS_FMT_Y10_1X10,
@@ -302,8 +308,8 @@ int ipu_isys_vidioc_querycap(struct file *file, void *fh,
 {
 	struct ipu_isys_video *av = video_drvdata(file);
 
-	strlcpy(cap->driver, IPU_ISYS_NAME, sizeof(cap->driver));
-	strlcpy(cap->card, av->isys->media_dev.model, sizeof(cap->card));
+	strscpy(cap->driver, IPU_ISYS_NAME, sizeof(cap->driver));
+	strscpy(cap->card, av->isys->media_dev.model, sizeof(cap->card));
 	snprintf(cap->bus_info, sizeof(cap->bus_info), "PCI:%s",
 		 av->isys->media_dev.bus_info);
 	return 0;
@@ -523,7 +529,7 @@ static int vidioc_enum_input(struct file *file, void *fh,
 {
 	if (input->index > 0)
 		return -EINVAL;
-	strlcpy(input->name, "camera", sizeof(input->name));
+	strscpy(input->name, "camera", sizeof(input->name));
 	input->type = V4L2_INPUT_TYPE_CAMERA;
 
 	return 0;
@@ -550,9 +556,6 @@ static int vidioc_s_input(struct file *file, void *fh, unsigned int input)
 static bool is_external(struct ipu_isys_video *av, struct media_entity *entity)
 {
 	struct v4l2_subdev *sd;
-#ifdef CONFIG_VIDEO_INTEL_IPU_TPG
-	unsigned int i;
-#endif
 
 	/* All video nodes are ours. */
 	if (!is_media_entity_v4l2_subdev(entity))
@@ -563,13 +566,6 @@ static bool is_external(struct ipu_isys_video *av, struct media_entity *entity)
 		    strlen(IPU_ISYS_ENTITY_PREFIX)) != 0)
 		return true;
 
-#ifdef CONFIG_VIDEO_INTEL_IPU_TPG
-	for (i = 0; i < av->isys->pdata->ipdata->tpg.ntpgs &&
-	     av->isys->tpg[i].isys; i++)
-		if (entity == &av->isys->tpg[i].asd.sd.entity)
-			return true;
-#endif
-
 	return false;
 }
 
@@ -578,8 +574,7 @@ static int link_validate(struct media_link *link)
 	struct ipu_isys_video *av =
 	    container_of(link->sink, struct ipu_isys_video, pad);
 	/* All sub-devices connected to a video node are ours. */
-	struct ipu_isys_pipeline *ip =
-		to_ipu_isys_pipeline(av->vdev.entity.pipe);
+	struct ipu_isys_pipeline *ip = &av->ip;
 	struct v4l2_subdev *sd;
 
 	if (!link->source->entity)
@@ -1010,11 +1005,6 @@ static int start_stream_firmware(struct ipu_isys_video *av,
 	if (ip->csi2 && !v4l2_ctrl_g_ctrl(ip->csi2->store_csi2_header))
 		stream_cfg->input_pins[0].mipi_store_mode =
 		    IPU_FW_ISYS_MIPI_STORE_MODE_DISCARD_LONG_HEADER;
-#ifdef CONFIG_VIDEO_INTEL_IPU_TPG
-	else if (ip->tpg && !v4l2_ctrl_g_ctrl(ip->tpg->store_csi2_header))
-		stream_cfg->input_pins[0].mipi_store_mode =
-		    IPU_FW_ISYS_MIPI_STORE_MODE_DISCARD_LONG_HEADER;
-#endif
 
 	stream_cfg->src = ip->source;
 	stream_cfg->vc = 0;
@@ -1079,8 +1069,6 @@ static int start_stream_firmware(struct ipu_isys_video *av,
 	    IPU_ISYS_SHORT_PACKET_FROM_RECEIVER)
 		csi_short_packet_prepare_fw_cfg(ip, stream_cfg);
 
-	ipu_fw_isys_dump_stream_cfg(dev, stream_cfg);
-
 	ip->nr_output_pins = stream_cfg->nof_output_pins;
 
 	rval = get_stream_handle(av);
@@ -1092,6 +1080,8 @@ static int start_stream_firmware(struct ipu_isys_video *av,
 	reinit_completion(&ip->stream_open_completion);
 
 	ipu_fw_isys_set_params(stream_cfg);
+
+	ipu_fw_isys_dump_stream_cfg(dev, stream_cfg);
 
 	rval = ipu_fw_isys_complex_cmd(av->isys,
 				       ip->stream_handle,
@@ -1329,9 +1319,6 @@ int ipu_isys_video_prepare_streaming(struct ipu_isys_video *av,
 	ip->csi2_be = NULL;
 	ip->csi2_be_soc = NULL;
 	ip->csi2 = NULL;
-#ifdef CONFIG_VIDEO_INTEL_IPU_TPG
-	ip->tpg = NULL;
-#endif
 	ip->seq_index = 0;
 	memset(ip->seq, 0, sizeof(ip->seq));
 
@@ -1700,8 +1687,9 @@ int ipu_isys_video_init(struct ipu_isys_video *av,
 			unsigned int pad, unsigned long pad_flags,
 			unsigned int flags)
 {
+	static atomic_t video_dev_count = ATOMIC_INIT(0);
 	const struct v4l2_ioctl_ops *ioctl_ops = NULL;
-	int rval;
+	int rval, video_dev_nr;
 
 	mutex_init(&av->mutex);
 	init_completion(&av->ip.stream_open_completion);
@@ -1751,9 +1739,15 @@ int ipu_isys_video_init(struct ipu_isys_video *av,
 	set_bit(V4L2_FL_USES_V4L2_FH, &av->vdev.flags);
 	video_set_drvdata(&av->vdev, av);
 
+	video_dev_nr = atomic_inc_return(&video_dev_count) - 1;
+	if (video_dev_nr < MAX_VIDEO_DEVICES)
+		video_dev_nr = video_nr[video_dev_nr];
+	else
+		video_dev_nr = -1;
+
 	mutex_lock(&av->mutex);
 
-	rval = video_register_device(&av->vdev, VFL_TYPE_VIDEO, -1);
+	rval = video_register_device(&av->vdev, VFL_TYPE_VIDEO, video_dev_nr);
 	if (rval)
 		goto out_media_entity_cleanup;
 
@@ -1770,6 +1764,7 @@ int ipu_isys_video_init(struct ipu_isys_video *av,
 
 	av->pfmt = av->try_fmt_vid_mplane(av, &av->mpix);
 
+	av->initialized = true;
 	mutex_unlock(&av->mutex);
 
 	return rval;
@@ -1791,9 +1786,13 @@ out_mutex_destroy:
 
 void ipu_isys_video_cleanup(struct ipu_isys_video *av)
 {
+	if (!av->initialized)
+		return;
+
 	kfree(av->watermark);
 	video_unregister_device(&av->vdev);
 	media_entity_cleanup(&av->vdev.entity);
 	mutex_destroy(&av->mutex);
 	ipu_isys_queue_cleanup(&av->aq);
+	av->initialized = false;
 }

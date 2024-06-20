@@ -183,7 +183,7 @@ static void skl_set_hda_codec_autosuspend_delay(struct snd_soc_card *card)
 	for_each_card_rtds(card, rtd) {
 		if (!strstr(rtd->dai_link->codecs->name, "ehdaudio0D0"))
 			continue;
-		dai = asoc_rtd_to_codec(rtd, 0);
+		dai = snd_soc_rtd_to_codec(rtd, 0);
 		hda_pvt = snd_soc_component_get_drvdata(dai->component);
 		if (hda_pvt) {
 			/*
@@ -229,6 +229,8 @@ static int skl_hda_audio_probe(struct platform_device *pdev)
 	ctx->common_hdmi_codec_drv = mach->mach_params.common_hdmi_codec_drv;
 
 	hda_soc_card.dev = &pdev->dev;
+	if (!snd_soc_acpi_sof_parent(&pdev->dev))
+		hda_soc_card.disable_route_checks = true;
 
 	if (mach->mach_params.dmic_num > 0) {
 		snprintf(hda_soc_components, sizeof(hda_soc_components),

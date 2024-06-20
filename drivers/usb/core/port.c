@@ -296,8 +296,10 @@ static void usb_port_shutdown(struct device *dev)
 {
 	struct usb_port *port_dev = to_usb_port(dev);
 
-	if (port_dev->child)
+	if (port_dev->child) {
 		usb_disable_usb2_hardware_lpm(port_dev->child);
+		usb_unlocked_disable_lpm(port_dev->child);
+	}
 }
 
 static const struct dev_pm_ops usb_port_pm_ops = {
@@ -451,7 +453,7 @@ static int match_location(struct usb_device *peer_hdev, void *p)
 	struct usb_hub *peer_hub = usb_hub_to_struct_hub(peer_hdev);
 	struct usb_device *hdev = to_usb_device(port_dev->dev.parent->parent);
 
-	if (!peer_hub)
+	if (!peer_hub || port_dev->connect_type == USB_PORT_NOT_USED)
 		return 0;
 
 	hcd = bus_to_hcd(hdev->bus);
@@ -462,7 +464,8 @@ static int match_location(struct usb_device *peer_hdev, void *p)
 
 	for (port1 = 1; port1 <= peer_hdev->maxchild; port1++) {
 		peer = peer_hub->ports[port1 - 1];
-		if (peer && peer->location == port_dev->location) {
+		if (peer && peer->connect_type != USB_PORT_NOT_USED &&
+		    peer->location == port_dev->location) {
 			link_peers_report(port_dev, peer);
 			return 1; /* done */
 		}
@@ -531,6 +534,7 @@ static void find_and_link_peer(struct usb_hub *hub, int port1)
 
 static int connector_bind(struct device *dev, struct device *connector, void *data)
 {
+	struct usb_port *port_dev = to_usb_port(dev);
 	int ret;
 
 	ret = sysfs_create_link(&dev->kobj, &connector->kobj, "connector");
@@ -538,16 +542,30 @@ static int connector_bind(struct device *dev, struct device *connector, void *da
 		return ret;
 
 	ret = sysfs_create_link(&connector->kobj, &dev->kobj, dev_name(dev));
-	if (ret)
+	if (ret) {
 		sysfs_remove_link(&dev->kobj, "connector");
+		return ret;
+	}
 
-	return ret;
+	port_dev->connector = data;
+
+	/*
+	 * If there is already USB device connected to the port, letting the
+	 * Type-C connector know about it immediately.
+	 */
+	if (port_dev->child)
+		typec_attach(port_dev->connector, &port_dev->child->dev);
+
+	return 0;
 }
 
 static void connector_unbind(struct device *dev, struct device *connector, void *data)
 {
+	struct usb_port *port_dev = to_usb_port(dev);
+
 	sysfs_remove_link(&connector->kobj, dev_name(dev));
 	sysfs_remove_link(&dev->kobj, "connector");
+	port_dev->connector = NULL;
 }
 
 static const struct component_ops connector_ops = {

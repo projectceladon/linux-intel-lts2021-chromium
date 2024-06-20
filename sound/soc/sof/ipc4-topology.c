@@ -970,6 +970,7 @@ static void sof_ipc4_unprepare_copier_module(struct snd_sof_widget *swidget)
 
 		ipc4_copier = dai->private;
 		if (ipc4_copier->dai_type == SOF_DAI_INTEL_ALH) {
+			struct sof_ipc4_copier_data *copier_data = &ipc4_copier->data;
 			struct sof_ipc4_alh_configuration_blob *blob;
 			unsigned int group_id;
 
@@ -979,6 +980,9 @@ static void sof_ipc4_unprepare_copier_module(struct snd_sof_widget *swidget)
 					   ALH_MULTI_GTW_BASE;
 				ida_free(&alh_group_ida, group_id);
 			}
+
+			/* clear the node ID */
+			copier_data->gtw_cfg.node_id &= ~SOF_IPC4_NODE_INDEX_MASK;
 		}
 	}
 
@@ -1045,6 +1049,7 @@ static int snd_sof_get_nhlt_endpoint_data(struct snd_sof_dev *sdev, struct snd_s
 	int sample_rate, channel_count;
 	int bit_depth, ret;
 	u32 nhlt_type;
+	int dev_type = 0;
 
 	/* convert to NHLT type */
 	switch (linktype) {
@@ -1060,18 +1065,30 @@ static int snd_sof_get_nhlt_endpoint_data(struct snd_sof_dev *sdev, struct snd_s
 						   &bit_depth);
 		if (ret < 0)
 			return ret;
+
+		/*
+		 * We need to know the type of the external device attached to a SSP
+		 * port to retrieve the blob from NHLT. However, device type is not
+		 * specified in topology.
+		 * Query the type for the port and then pass that information back
+		 * to the blob lookup function.
+		 */
+		dev_type = intel_nhlt_ssp_device_type(sdev->dev, ipc4_data->nhlt,
+						      dai_index);
+		if (dev_type < 0)
+			return dev_type;
 		break;
 	default:
 		return 0;
 	}
 
-	dev_dbg(sdev->dev, "dai index %d nhlt type %d direction %d\n",
-		dai_index, nhlt_type, dir);
+	dev_dbg(sdev->dev, "dai index %d nhlt type %d direction %d dev type %d\n",
+		dai_index, nhlt_type, dir, dev_type);
 
 	/* find NHLT blob with matching params */
 	cfg = intel_nhlt_get_endpoint_blob(sdev->dev, ipc4_data->nhlt, dai_index, nhlt_type,
 					   bit_depth, bit_depth, channel_count, sample_rate,
-					   dir, 0);
+					   dir, dev_type);
 
 	if (!cfg) {
 		dev_err(sdev->dev,
@@ -1690,8 +1707,15 @@ static int sof_ipc4_dai_config(struct snd_sof_dev *sdev, struct snd_sof_widget *
 		gtw_attr->lp_buffer_alloc = pipeline->lp_mode;
 		fallthrough;
 	case SOF_DAI_INTEL_ALH:
-		copier_data->gtw_cfg.node_id &= ~SOF_IPC4_NODE_INDEX_MASK;
-		copier_data->gtw_cfg.node_id |= SOF_IPC4_NODE_INDEX(data->dai_data);
+		/*
+		 * Do not clear the node ID when this op is invoked with
+		 * SOF_DAI_CONFIG_FLAGS_HW_FREE. It is needed to free the group_ida during
+		 * unprepare.
+		 */
+		if (flags & SOF_DAI_CONFIG_FLAGS_HW_PARAMS) {
+			copier_data->gtw_cfg.node_id &= ~SOF_IPC4_NODE_INDEX_MASK;
+			copier_data->gtw_cfg.node_id |= SOF_IPC4_NODE_INDEX(data->dai_data);
+		}
 		break;
 	case SOF_DAI_INTEL_DMIC:
 	case SOF_DAI_INTEL_SSP:

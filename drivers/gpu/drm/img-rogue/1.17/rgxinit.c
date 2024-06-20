@@ -58,6 +58,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "rgxpower.h"
 #include "tlstream.h"
 #include "pvrsrv_tlstreams.h"
+#include "pvr_ricommon.h"
 
 #include "rgxinit.h"
 #include "rgxbvnc.h"
@@ -2838,6 +2839,7 @@ static PVRSRV_ERROR RGXAllocTrampoline(PVRSRV_DEVICE_NODE *psDeviceNode)
 				"TrampolineRegion",
 				&pasTrampoline[i]->hPdumpPages,
 #endif
+				PVR_SYS_ALLOC_PID,
 				&pasTrampoline[i]->sPages,
 				&pasTrampoline[i]->sPhysAddr);
 		if (PVRSRV_OK != eError)
@@ -3644,7 +3646,6 @@ PVRSRV_ERROR DevDeInitRGX(PVRSRV_DEVICE_NODE *psDeviceNode)
 	PVRSRV_RGXDEV_INFO		*psDevInfo = (PVRSRV_RGXDEV_INFO*)psDeviceNode->pvDevice;
 	PVRSRV_ERROR			eError;
 	DEVICE_MEMORY_INFO		*psDevMemoryInfo;
-	IMG_UINT32		ui32Temp=0;
 
 	if (!psDevInfo)
 	{
@@ -3659,65 +3660,6 @@ PVRSRV_ERROR DevDeInitRGX(PVRSRV_DEVICE_NODE *psDeviceNode)
 	}
 
 	DeviceDepBridgeDeInit(psDevInfo);
-
-#if defined(PDUMP)
-	DevmemIntFreeDefBackingPage(psDeviceNode,
-								&psDeviceNode->sDummyPage,
-								DUMMY_PAGE);
-	DevmemIntFreeDefBackingPage(psDeviceNode,
-								&psDeviceNode->sDevZeroPage,
-								DEV_ZERO_PAGE);
-#endif
-
-#if defined(PVRSRV_FORCE_UNLOAD_IF_BAD_STATE)
-	if (PVRSRVGetPVRSRVData()->eServicesState != PVRSRV_SERVICES_STATE_OK)
-	{
-		OSAtomicWrite(&psDeviceNode->sDummyPage.atRefCounter, 0);
-		PVR_UNREFERENCED_PARAMETER(ui32Temp);
-	}
-	else
-#else
-	{
-		/*Delete the Dummy page related info */
-		ui32Temp = (IMG_UINT32)OSAtomicRead(&psDeviceNode->sDummyPage.atRefCounter);
-		if (0 != ui32Temp)
-		{
-			PVR_DPF((PVR_DBG_ERROR,
-			         "%s: Dummy page reference counter is non zero (%u)",
-			         __func__,
-			         ui32Temp));
-			PVR_ASSERT(0);
-		}
-	}
-#endif
-
-	/*Delete the Dummy page related info */
-	ui32Temp = (IMG_UINT32)OSAtomicRead(&psDeviceNode->sDevZeroPage.atRefCounter);
-	if (0 != ui32Temp)
-	{
-		PVR_DPF((PVR_DBG_ERROR,
-		         "%s: Zero page reference counter is non zero (%u)",
-		         __func__,
-		         ui32Temp));
-	}
-
-#if defined(PDUMP)
-	if (NULL != psDeviceNode->sDummyPage.hPdumpPg)
-	{
-		PDUMPCOMMENT(psDeviceNode, "Error dummy page handle is still active");
-	}
-
-	if (NULL != psDeviceNode->sDevZeroPage.hPdumpPg)
-	{
-		PDUMPCOMMENT(psDeviceNode, "Error Zero page handle is still active");
-	}
-#endif
-
-	/*The lock type need to be dispatch type here because it can be acquired from MISR (Z-buffer) path */
-	OSLockDestroy(psDeviceNode->sDummyPage.psPgLock);
-
-	/* Destroy the zero page lock */
-	OSLockDestroy(psDeviceNode->sDevZeroPage.psPgLock);
 
 #if defined(SUPPORT_POWER_SAMPLING_VIA_DEBUGFS)
 	OSLockDestroy(psDevInfo->hCounterDumpingLock);
@@ -4198,7 +4140,7 @@ static void _InstantiateRequiredHeaps(PVRSRV_RGXDEV_INFO     *psDevInfo,
 
 		if (psHeapInfo->ui32HeapInstanceFlags & HEAP_INST_NON4K_FLAG)
 		{
-			ui32Log2DataPageSize = psDevInfo->ui32Log2Non4KPgSize;
+			ui32Log2DataPageSize = psDevInfo->psDeviceNode->ui32RGXLog2Non4KPgSize;
 		}
 		else
 		{
@@ -4486,25 +4428,52 @@ ErrorDeinit:
 	return eError;
 }
 
-static void _ReadNon4KHeapPageSize(IMG_UINT32 *pui32Log2Non4KPgSize)
+static void _ReadNon4KHeapPageShift(IMG_UINT32 *pui32Log2Non4KPgShift)
 {
-	void *pvAppHintState = NULL;
-	IMG_UINT32 ui32AppHintDefault = PVRSRV_APPHINT_GENERALNON4KHEAPPAGESIZE;
-	IMG_UINT32 ui32GeneralNon4KHeapPageSize;
+	IMG_UINT32 uiLog2OSPageShift = OSGetPageShift();
 
-	/* Get the page size for the dummy page from the NON4K heap apphint */
-	OSCreateKMAppHintState(&pvAppHintState);
-	OSGetKMAppHintUINT32(APPHINT_NO_DEVICE, pvAppHintState,
-		                 GeneralNon4KHeapPageSize, &ui32AppHintDefault,
-                         &ui32GeneralNon4KHeapPageSize);
-	*pui32Log2Non4KPgSize = ExactLog2(ui32GeneralNon4KHeapPageSize);
-	OSFreeKMAppHintState(pvAppHintState);
+	/* We support Non4K pages only on platforms with 4KB pages. On all platforms
+	 * where OS pages are larger than 4KB we must ensure the non4K device memory
+	 * heap matches the page size used in all other device memory heaps, which
+	 * is the OS page size, see RGXHeapDerivePageSize. */
+	if (uiLog2OSPageShift > RGX_HEAP_4KB_PAGE_SHIFT)
+	{
+		*pui32Log2Non4KPgShift = RGXHeapDerivePageSize(uiLog2OSPageShift);
+	}
+	else
+	{
+		void *pvAppHintState = NULL;
+		IMG_UINT32 ui32AppHintDefault = PVRSRV_APPHINT_GENERALNON4KHEAPPAGESIZE;
+		IMG_UINT32 ui32GeneralNon4KHeapPageSize;
+
+		/* Get the page size for the dummy page from the NON4K heap apphint */
+		OSCreateKMAppHintState(&pvAppHintState);
+		OSGetKMAppHintUINT32(APPHINT_NO_DEVICE, pvAppHintState,
+		                     GeneralNon4KHeapPageSize, &ui32AppHintDefault,
+		                     &ui32GeneralNon4KHeapPageSize);
+		*pui32Log2Non4KPgShift = ExactLog2(ui32GeneralNon4KHeapPageSize);
+		OSFreeKMAppHintState(pvAppHintState);
+	}
+
+	/* Check the Non4k page size is at least the size of the OS page size
+	 * or larger. The Non4k page size also has to be a multiple of the OS page
+	 * size but since we have the log2 value from the apphint we know powers of 2
+	 * will always be multiples. If the Non4k page size is less than OS page size
+	 * we notify and upgrade the size.
+	 */
+	if (*pui32Log2Non4KPgShift < uiLog2OSPageShift)
+	{
+		PVR_DPF((PVR_DBG_MESSAGE, "Non4K page size smaller than OS page size, upgrading to "
+		                          "match OS page size."));
+		*pui32Log2Non4KPgShift = uiLog2OSPageShift;
+	}
 }
 
 /* RGXRegisterDevice
  *
- * NOTE: No PDUMP statements are allowed in until Part 2 of the device initialisation
- * is reached.
+ * WARNING!
+ *
+ * No PDUMP statements are allowed until device initialisation starts.
  */
 PVRSRV_ERROR RGXRegisterDevice(PVRSRV_DEVICE_NODE *psDeviceNode)
 {
@@ -4598,46 +4567,6 @@ PVRSRV_ERROR RGXRegisterDevice(PVRSRV_DEVICE_NODE *psDeviceNode)
 
 	/* Register callback for initialising device-specific physical memory heaps */
 	psDeviceNode->pfnPhysMemDeviceHeapsInit = RGXPhysMemDeviceHeapsInit;
-
-	/* Set up required support for dummy page */
-	OSAtomicWrite(&(psDeviceNode->sDummyPage.atRefCounter), 0);
-	OSAtomicWrite(&(psDeviceNode->sDevZeroPage.atRefCounter), 0);
-
-	/* Set the order to 0 */
-	psDeviceNode->sDummyPage.sPageHandle.uiOrder = 0;
-	psDeviceNode->sDevZeroPage.sPageHandle.uiOrder = 0;
-
-	/* Set the size of the Dummy page to zero */
-	psDeviceNode->sDummyPage.ui32Log2PgSize = 0;
-
-	/* Set the size of the Zero page to zero */
-	psDeviceNode->sDevZeroPage.ui32Log2PgSize = 0;
-
-	/* Set the Dummy page phys addr */
-	psDeviceNode->sDummyPage.ui64PgPhysAddr = MMU_BAD_PHYS_ADDR;
-
-	/* Set the Zero page phys addr */
-	psDeviceNode->sDevZeroPage.ui64PgPhysAddr = MMU_BAD_PHYS_ADDR;
-
-	/* The lock can be acquired from MISR (Z-buffer) path */
-	eError = OSLockCreate(&psDeviceNode->sDummyPage.psPgLock);
-	if (PVRSRV_OK != eError)
-	{
-		PVR_DPF((PVR_DBG_ERROR, "%s: Failed to create dummy page lock", __func__));
-		return eError;
-	}
-
-	/* Create the lock for zero page */
-	eError = OSLockCreate(&psDeviceNode->sDevZeroPage.psPgLock);
-	if (PVRSRV_OK != eError)
-	{
-		PVR_DPF((PVR_DBG_ERROR, "%s: Failed to create Zero page lock", __func__));
-		goto free_dummy_page;
-	}
-#if defined(PDUMP)
-	psDeviceNode->sDummyPage.hPdumpPg = NULL;
-	psDeviceNode->sDevZeroPage.hPdumpPg = NULL;
-#endif
 
 	/*********************
 	 * Device info setup *
@@ -4810,11 +4739,7 @@ PVRSRV_ERROR RGXRegisterDevice(PVRSRV_DEVICE_NODE *psDeviceNode)
 		goto e14;
 	}
 
-	_ReadNon4KHeapPageSize(&psDevInfo->ui32Log2Non4KPgSize);
-
-	/*Set the zero & dummy page sizes as needed for the heap with largest page size */
-	psDeviceNode->sDevZeroPage.ui32Log2PgSize = psDevInfo->ui32Log2Non4KPgSize;
-	psDeviceNode->sDummyPage.ui32Log2PgSize = psDevInfo->ui32Log2Non4KPgSize;
+	_ReadNon4KHeapPageShift(&psDeviceNode->ui32RGXLog2Non4KPgSize);
 
 	eError = RGXInitHeaps(psDevInfo, psDevMemoryInfo);
 	if (eError != PVRSRV_OK)
@@ -4947,13 +4872,6 @@ e1:
 	OSWRLockDestroy(psDevInfo->hRenderCtxListLock);
 e0:
 	OSFreeMem(psDevInfo);
-
-	/* Destroy the zero page lock created above */
-	OSLockDestroy(psDeviceNode->sDevZeroPage.psPgLock);
-
-free_dummy_page:
-	/* Destroy the dummy page lock created above */
-	OSLockDestroy(psDeviceNode->sDummyPage.psPgLock);
 
 	PVR_ASSERT(eError != PVRSRV_OK);
 	return eError;

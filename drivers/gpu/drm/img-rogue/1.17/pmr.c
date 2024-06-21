@@ -1188,8 +1188,18 @@ PVRSRV_ERROR
 PMRUnlockSysPhysAddressesNested(PMR *psPMR, IMG_UINT32 ui32NestingLevel)
 {
 	PVRSRV_ERROR eError;
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+	PMR_IMPL_ZOMBIEPAGES pvZombiePages = NULL;
+	PMR_ZOMBIE_PAGES* psPMRZombiePages = NULL;
+#endif
 
 	PVR_ASSERT(psPMR != NULL);
+
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+	/* Speculatively preallocate in order to simplify error handling later */
+	psPMRZombiePages = OSAllocZMem(sizeof(PMR_ZOMBIE_PAGES));
+	PVR_GOTO_IF_NOMEM(psPMRZombiePages, eError, e0);
+#endif
 
 	/* Acquiring the lock here, as well as during the Lock operation ensures
 	 * the lock count hitting zero and the unlocking of the phys addresses is
@@ -1204,7 +1214,13 @@ PMRUnlockSysPhysAddressesNested(PMR *psPMR, IMG_UINT32 ui32NestingLevel)
 		{
 			PVR_ASSERT(psPMR->psFuncTab->pfnLockPhysAddresses != NULL);
 
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+			eError = psPMR->psFuncTab->pfnUnlockPhysAddresses(psPMR->pvFlavourData,
+			                                                  &pvZombiePages);
+#else
 			eError = psPMR->psFuncTab->pfnUnlockPhysAddresses(psPMR->pvFlavourData);
+#endif
+
 			/* must never fail */
 			PVR_ASSERT(eError == PVRSRV_OK);
 		}
@@ -1212,12 +1228,58 @@ PMRUnlockSysPhysAddressesNested(PMR *psPMR, IMG_UINT32 ui32NestingLevel)
 
 	OSLockRelease(psPMR->hLock);
 
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+	if (pvZombiePages != NULL)
+	{
+		PVRSRV_DEV_POWER_STATE ePowerState;
+		PVRSRV_DEVICE_NODE *psDevNode;
+
+		psDevNode = PhysHeapDeviceNode(psPMR->psPhysHeap);
+		eError = PVRSRVGetDevicePowerState(psDevNode, &ePowerState);
+		if (eError != PVRSRV_OK)
+		{
+			/* Treat unknown power state as ON. */
+			ePowerState = PVRSRV_DEV_POWER_STATE_ON;
+		}
+
+		if (ePowerState == PVRSRV_DEV_POWER_STATE_OFF)
+		{
+			/* Free preallocated psPMRZombiePages as these won't be used*/
+			OSFreeMem(psPMRZombiePages);
+
+			eError = psPMR->psFuncTab->pfnFreeZombiePages(pvZombiePages);
+			PVR_LOG_GOTO_IF_ERROR(eError, "Error when trying to free zombies immediately.", e0);
+		}
+		else
+		{
+			PVR_ASSERT(psPMRZombiePages != NULL);
+			psPMRZombiePages->sHeader.bIsZombiePages = IMG_TRUE;
+			psPMRZombiePages->pfnFactoryFreeZombies = psPMR->psFuncTab->pfnFreeZombiePages;
+			psPMRZombiePages->pvFactoryPages = pvZombiePages;
+
+			OSLockAcquire(psDevNode->hPMRZombieListLock);
+			dllist_add_to_tail(&psDevNode->sPMRZombieList, &psPMRZombiePages->sHeader.sZombieNode);
+			psDevNode->uiPMRZombieCount++;
+			OSLockRelease(psDevNode->hPMRZombieListLock);
+		}
+	}
+	else
+	{
+		OSFreeMem(psPMRZombiePages);
+	}
+#endif
+
 	/* We also count the locks as references, so that the PMR is not
 	 * freed while someone is using a physical address.
 	 */
 	_UnrefAndMaybeDestroy(psPMR);
 
 	return PVRSRV_OK;
+
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+e0:
+#endif
+	return eError;
 }
 
 PVRSRV_ERROR

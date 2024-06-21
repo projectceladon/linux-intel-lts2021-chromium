@@ -3053,6 +3053,87 @@ _ExtractPages(PMR_OSPAGEARRAY_DATA *psSrcPageArrayData,
 	*psOutPageArrayData = psDstPageArrayData;
 	return PVRSRV_OK;
 }
+
+/* Extracts all allocated pages referenced psSrcPageArrayData
+ * Allocates a new PMR_OSPAGEARRAY_DATA object and fills it with the extracted
+ * pages information.
+ */
+static PVRSRV_ERROR
+_ExtractAllPages(PMR_OSPAGEARRAY_DATA *psSrcPageArrayData,
+				 PMR_OSPAGEARRAY_DATA **psOutPageArrayData)
+{
+	PVRSRV_ERROR eError;
+	IMG_UINT32 i, uiOrder;
+	PMR_OSPAGEARRAY_DATA* psDstPageArrayData;
+	IMG_UINT32 uiPagesCopied = 0;
+
+	/* Alloc PMR_OSPAGEARRAY_DATA for the extracted pages */
+	eError = _AllocOSPageArray(psSrcPageArrayData->psDevNode,
+	                           1ULL << psSrcPageArrayData->uiLog2AllocPageSize,
+	                           psSrcPageArrayData->iNumOSPagesAllocated,
+	                           psSrcPageArrayData->uiTotalNumOSPages,
+	                           psSrcPageArrayData->uiLog2AllocPageSize,
+	                           psSrcPageArrayData->ui32AllocFlags,
+	                           psSrcPageArrayData->ui32CPUCacheFlags,
+	                           psSrcPageArrayData->uiPid,
+	                           &psDstPageArrayData);
+	if (eError != PVRSRV_OK)
+	{
+		PVR_DPF((PVR_DBG_ERROR, "_AllocOSPageArray failed in _ExtractAllPages"));
+		return eError;
+	}
+
+	uiOrder = psSrcPageArrayData->uiLog2AllocPageSize - PAGE_SHIFT;
+
+	/* Transfer from src pagearray to dst pagearray */
+	/* Iterate through all pages in psSrcPageArrayData but stop once
+	 * we have copied psSrcPageArrayData->iNumOSPagesAllocated pages to
+	 * psDstPageArrayData.
+	 */
+	for (i = 0; ((i < psSrcPageArrayData->uiTotalNumOSPages) &&
+	             (uiPagesCopied < psSrcPageArrayData->iNumOSPagesAllocated)); i++)
+	{
+		if (psSrcPageArrayData->pagearray[i] != NULL)
+		{
+			psDstPageArrayData->pagearray[uiPagesCopied] = psSrcPageArrayData->pagearray[i];
+			psSrcPageArrayData->pagearray[i] = NULL;
+			uiPagesCopied++;
+		}
+	}
+
+	/* Reset uiPagesCopied */
+	uiPagesCopied = 0;
+
+	/* Do the same for dmaphysarray and dmavirtarray if allocated with CMA */
+	if (BIT_ISSET(psSrcPageArrayData->ui32AllocFlags, FLAG_IS_CMA))
+	{
+		/* Iterate through all pages in psSrcPageArrayData but stop once
+		 * we have copied psSrcPageArrayData->iNumOSPagesAllocated pages to
+		 * psDstPageArrayData.
+		 */
+		for (i = 0; ((i < psSrcPageArrayData->uiTotalNumOSPages) &&
+		             (uiPagesCopied < psSrcPageArrayData->iNumOSPagesAllocated)); i++)
+		{
+			if (psSrcPageArrayData->dmaphysarray[i] != (dma_addr_t)0 ||
+			    psSrcPageArrayData->dmavirtarray[i] != NULL)
+			{
+				psDstPageArrayData->dmaphysarray[uiPagesCopied] = psSrcPageArrayData->dmaphysarray[i];
+				psDstPageArrayData->dmavirtarray[uiPagesCopied] = psSrcPageArrayData->dmavirtarray[i];
+
+				psSrcPageArrayData->dmaphysarray[i] = (dma_addr_t)0;
+				psSrcPageArrayData->dmavirtarray[i] = NULL;
+				uiPagesCopied++;
+			}
+		}
+	}
+
+	/* Update page counts */
+	psDstPageArrayData->iNumOSPagesAllocated = psSrcPageArrayData->iNumOSPagesAllocated << uiOrder;
+	psSrcPageArrayData->iNumOSPagesAllocated = 0;
+
+	*psOutPageArrayData = psDstPageArrayData;
+	return PVRSRV_OK;
+}
 #endif /* defined(SUPPORT_PMR_PAGES_DEFERRED_FREE) */
 
 /* Free pages from a page array.
@@ -3261,15 +3342,45 @@ PMRLockSysPhysAddressesOSMem(PMR_IMPL_PRIVDATA pvPriv)
 	return eError;
 }
 
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+static PVRSRV_ERROR
+PMRUnlockSysPhysAddressesOSMem(PMR_IMPL_PRIVDATA pvPriv,
+                               PMR_IMPL_ZOMBIEPAGES *ppvZombiePages)
+#else
 static PVRSRV_ERROR
 PMRUnlockSysPhysAddressesOSMem(PMR_IMPL_PRIVDATA pvPriv)
+#endif
 {
 	/* Just drops the refcount. */
 	PVRSRV_ERROR eError = PVRSRV_OK;
 	PMR_OSPAGEARRAY_DATA *psOSPageArrayData = pvPriv;
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+	PMR_OSPAGEARRAY_DATA *psExtractedPagesPageArray = NULL;
+
+	*ppvZombiePages = NULL;
+#endif
 
 	if (BIT_ISSET(psOSPageArrayData->ui32AllocFlags, FLAG_ONDEMAND))
 	{
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+		if (psOSPageArrayData->iNumOSPagesAllocated == 0)
+		{
+			*ppvZombiePages = NULL;
+			return PVRSRV_OK;
+		}
+
+		eError = _ExtractAllPages(psOSPageArrayData,
+		                          &psExtractedPagesPageArray);
+		PVR_LOG_GOTO_IF_ERROR(eError, "_ExtractAllPages", e0);
+
+		if (psExtractedPagesPageArray)
+		{
+			/* Zombify pages to get proper stats */
+			eError = PMRZombifyOSMem(psExtractedPagesPageArray, NULL);
+			PVR_WARN_IF_ERROR(eError, "PMRZombifyOSMem");
+		}
+		*ppvZombiePages = psExtractedPagesPageArray;
+#else
 		/* Free Memory for deferred allocation */
 		eError = _FreeOSPages(psOSPageArrayData,
 							  NULL,
@@ -3278,8 +3389,12 @@ PMRUnlockSysPhysAddressesOSMem(PMR_IMPL_PRIVDATA pvPriv)
 		{
 			return eError;
 		}
+#endif
 	}
 
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+e0:
+#endif
 	PVR_ASSERT(eError == PVRSRV_OK);
 	return eError;
 }

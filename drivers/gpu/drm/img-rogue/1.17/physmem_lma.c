@@ -1310,13 +1310,21 @@ PMRLockSysPhysAddressesLocalMem(PMR_IMPL_PRIVDATA pvPriv)
 	return PVRSRV_OK;
 }
 
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
+static PVRSRV_ERROR
+PMRUnlockSysPhysAddressesLocalMem(PMR_IMPL_PRIVDATA pvPriv,
+                                  PMR_IMPL_ZOMBIEPAGES *ppvZombiePages)
+#else
 static PVRSRV_ERROR
 PMRUnlockSysPhysAddressesLocalMem(PMR_IMPL_PRIVDATA pvPriv)
+#endif
 {
 	PVRSRV_ERROR eError = PVRSRV_OK;
-	PMR_LMALLOCARRAY_DATA *psLMAllocArrayData;
+	PMR_LMALLOCARRAY_DATA *psLMAllocArrayData = pvPriv;
+#if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
 
-	psLMAllocArrayData = pvPriv;
+	*ppvZombiePages = NULL;
+#endif
 
 	if (psLMAllocArrayData->bOnDemand)
 	{

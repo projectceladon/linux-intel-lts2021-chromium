@@ -3781,7 +3781,7 @@ PMRChangeSparseMemOSMem(PMR_IMPL_PRIVDATA pPriv,
 						IMG_UINT32 ui32FreePageCount,
 						IMG_UINT32 *pai32FreeIndices,
 #if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
-						PMR_IMPL_ZOMBIEPAGES ppsZombiePages,
+						PMR_IMPL_ZOMBIEPAGES *ppvZombiePages,
 #endif
 						IMG_UINT32 uiFlags)
 {
@@ -3836,7 +3836,7 @@ PMRChangeSparseMemOSMem(PMR_IMPL_PRIVDATA pPriv,
 	}
 
 #if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
-	*((PMR_OSPAGEARRAY_DATA**)ppsZombiePages) = NULL;
+	*ppvZombiePages = NULL;
 #endif
 
 	if (0 == (ui32CommonRequestCount || ui32AdtnlAllocPages || ui32AdtnlFreePages))
@@ -3993,7 +3993,7 @@ PMRChangeSparseMemOSMem(PMR_IMPL_PRIVDATA pPriv,
 		eError = PMRZombifyOSMem(psExtractedPagesPageArray, NULL);
 		PVR_LOG_IF_ERROR(eError, "psExtractedPagesPageArray");
 
-		*((PMR_OSPAGEARRAY_DATA**)ppsZombiePages) = psExtractedPagesPageArray;
+		*ppvZombiePages = psExtractedPagesPageArray;
 #else
 		eError = _FreeOSPages(psPMRPageArrayData,
 		                      &pai32FreeIndices[ui32Loop],

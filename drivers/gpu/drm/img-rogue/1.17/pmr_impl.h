@@ -383,7 +383,7 @@ typedef PVRSRV_ERROR (*PFN_PIN_MEM_FN)(PMR_IMPL_PRIVDATA pPriv,
                                       allocation that do not require
                                       a physical allocation.
 @Input          ui32Flags             Allocation flags
-@Output         pZombiePages          Zombie pages object. If non-null is returned
+@Output         ppvZombiePages        Zombie pages object. If non-null is returned
                                       caller is obligated to call pfnFreeZombiePages
                                       at an appropriate time to prevent memory leaks
 
@@ -397,7 +397,7 @@ typedef PVRSRV_ERROR (*PFN_CHANGE_SPARSE_MEM_FN)(PMR_IMPL_PRIVDATA pPriv,
                       IMG_UINT32 ui32FreePageCount,
                       IMG_UINT32 *pai32FreeIndices,
 #if defined(SUPPORT_PMR_PAGES_DEFERRED_FREE)
-                      PMR_IMPL_ZOMBIEPAGES pZombiePages,
+                      PMR_IMPL_ZOMBIEPAGES *ppvZombiePages,
 #endif
                       IMG_UINT32 uiFlags);
 

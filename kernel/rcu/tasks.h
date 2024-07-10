@@ -20,6 +20,34 @@ typedef void (*holdouts_func_t)(struct list_head *hop, bool ndrpt, bool *frptp);
 typedef void (*postgp_func_t)(struct rcu_tasks *rtp);
 
 /**
+ * struct rcu_tasks_percpu - Per-CPU component of definition for a Tasks-RCU-like mechanism.
+ * @cblist: Callback list.
+ * @lock: Lock protecting per-CPU callback list.
+ * @rtp_jiffies: Jiffies counter value for statistics.
+ * @rtp_n_lock_retries: Rough lock-contention statistic.
+ * @rtp_work: Work queue for invoking callbacks.
+ * @rtp_irq_work: IRQ work queue for deferred wakeups.
+ * @barrier_q_head: RCU callback for barrier operation.
+ * @rtp_blkd_tasks: List of tasks blocked as readers.
+ * @cpu: CPU number corresponding to this entry.
+ * @index: Index of this CPU in rtpcp_array of the rcu_tasks structure.
+ * @rtpp: Pointer to the rcu_tasks structure.
+ */
+struct rcu_tasks_percpu {
+	struct rcu_segcblist cblist;
+	raw_spinlock_t __private lock;
+	unsigned long rtp_jiffies;
+	unsigned long rtp_n_lock_retries;
+	struct work_struct rtp_work;
+	struct irq_work rtp_irq_work;
+	struct rcu_head barrier_q_head;
+	struct list_head rtp_blkd_tasks;
+	int cpu;
+	int index;
+	struct rcu_tasks *rtpp;
+};
+
+/**
  * struct rcu_tasks - Definition for a Tasks-RCU-like mechanism.
  * @cbs_head: Head of callback list.
  * @cbs_tail: Tail pointer for callback list.
@@ -41,6 +69,16 @@ typedef void (*postgp_func_t)(struct rcu_tasks *rtp);
  * @holdouts_func: This flavor's holdout-list scan function (optional).
  * @postgp_func: This flavor's post-grace-period function (optional).
  * @call_func: This flavor's call_rcu()-equivalent function.
+ * @rtpcpu: This flavor's rcu_tasks_percpu structure.
+ * @rtpcp_array: Array of pointers to rcu_tasks_percpu structure of CPUs in cpu_possible_mask.
+ * @percpu_enqueue_shift: Shift down CPU ID this much when enqueuing callbacks.
+ * @percpu_enqueue_lim: Number of per-CPU callback queues in use for enqueuing.
+ * @percpu_dequeue_lim: Number of per-CPU callback queues in use for dequeuing.
+ * @percpu_dequeue_gpseq: RCU grace-period number to propagate enqueue limit to dequeuers.
+ * @barrier_q_mutex: Serialize barrier operations.
+ * @barrier_q_count: Number of queues being waited on.
+ * @barrier_q_completion: Barrier wait/wakeup mechanism.
+ * @barrier_q_seq: Sequence number for barrier operations.
  * @name: This flavor's textual name.
  * @kname: This flavor's kthread name.
  */
@@ -65,6 +103,16 @@ struct rcu_tasks {
 	holdouts_func_t holdouts_func;
 	postgp_func_t postgp_func;
 	call_rcu_func_t call_func;
+	struct rcu_tasks_percpu __percpu *rtpcpu;
+	struct rcu_tasks_percpu **rtpcp_array;
+	int percpu_enqueue_shift;
+	int percpu_enqueue_lim;
+	int percpu_dequeue_lim;
+	unsigned long percpu_dequeue_gpseq;
+	struct mutex barrier_q_mutex;
+	atomic_t barrier_q_count;
+	struct completion barrier_q_completion;
+	unsigned long barrier_q_seq;
 	char *name;
 	char *kname;
 };
@@ -93,6 +141,8 @@ module_param(rcu_task_ipi_delay, int, 0644);
 #define RCU_TASK_STALL_TIMEOUT (HZ * 60 * 10)
 static int rcu_task_stall_timeout __read_mostly = RCU_TASK_STALL_TIMEOUT;
 module_param(rcu_task_stall_timeout, int, 0644);
+
+static int rcu_task_cpu_ids;
 
 /* RCU tasks grace-period state for debugging. */
 #define RTGS_INIT		 0
@@ -148,6 +198,80 @@ static const char *tasks_gp_state_getname(struct rcu_tasks *rtp)
 }
 #endif /* #ifndef CONFIG_TINY_RCU */
 
+// Initialize per-CPU callback lists for the specified flavor of
+// Tasks RCU.
+static void cblist_init_generic(struct rcu_tasks *rtp)
+{
+	int cpu;
+	unsigned long flags;
+	int lim;
+	int shift;
+	int maxcpu;
+	int index = 0;
+
+	raw_spin_lock_irqsave(&rtp->cbs_gbl_lock, flags);
+	if (rcu_task_enqueue_lim < 0) {
+		rcu_task_enqueue_lim = 1;
+		rcu_task_cb_adjust = true;
+	} else if (rcu_task_enqueue_lim == 0) {
+		rcu_task_enqueue_lim = 1;
+	}
+	lim = rcu_task_enqueue_lim;
+
+	rtp->rtpcp_array = kcalloc(num_possible_cpus(), sizeof(struct rcu_tasks_percpu *), GFP_KERNEL);
+	BUG_ON(!rtp->rtpcp_array);
+
+	for_each_possible_cpu(cpu) {
+		struct rcu_tasks_percpu *rtpcp = per_cpu_ptr(rtp->rtpcpu, cpu);
+
+		WARN_ON_ONCE(!rtpcp);
+		if (cpu)
+			raw_spin_lock_init(&ACCESS_PRIVATE(rtpcp, lock));
+		raw_spin_lock_rcu_node(rtpcp); // irqs already disabled.
+		if (rcu_segcblist_empty(&rtpcp->cblist))
+			rcu_segcblist_init(&rtpcp->cblist);
+		INIT_WORK(&rtpcp->rtp_work, rcu_tasks_invoke_cbs_wq);
+		rtpcp->cpu = cpu;
+		rtpcp->rtpp = rtp;
+		rtpcp->index = index;
+		rtp->rtpcp_array[index] = rtpcp;
+		index++;
+		if (!rtpcp->rtp_blkd_tasks.next)
+			INIT_LIST_HEAD(&rtpcp->rtp_blkd_tasks);
+		raw_spin_unlock_rcu_node(rtpcp); // irqs remain disabled.
+		maxcpu = cpu;
+	}
+	raw_spin_unlock_irqrestore(&rtp->cbs_gbl_lock, flags);
+
+	if (rcu_task_cb_adjust)
+		pr_info("%s: Setting adjustable number of callback queues.\n", __func__);
+
+	rcu_task_cpu_ids = maxcpu + 1;
+	if (lim > rcu_task_cpu_ids)
+		lim = rcu_task_cpu_ids;
+	shift = ilog2(rcu_task_cpu_ids / lim);
+	if (((rcu_task_cpu_ids - 1) >> shift) >= lim)
+		shift++;
+	WRITE_ONCE(rtp->percpu_enqueue_shift, shift);
+	WRITE_ONCE(rtp->percpu_dequeue_lim, lim);
+	smp_store_release(&rtp->percpu_enqueue_lim, lim);
+
+	pr_info("%s: Setting shift to %d and lim to %d rcu_task_cb_adjust=%d rcu_task_cpu_ids=%d.\n",
+			rtp->name, data_race(rtp->percpu_enqueue_shift), data_race(rtp->percpu_enqueue_lim),
+			rcu_task_cb_adjust, rcu_task_cpu_ids);
+
+}
+
+// IRQ-work handler that does deferred wakeup for call_rcu_tasks_generic().
+static void call_rcu_tasks_iw_wakeup(struct irq_work *iwp)
+{
+	struct rcu_tasks *rtp;
+	struct rcu_tasks_percpu *rtpcp = container_of(iwp, struct rcu_tasks_percpu, rtp_irq_work);
+
+	rtp = rtpcp->rtpp;
+	rcuwait_wake_up(&rtp->cbs_wait);
+}
+
 // Enqueue a callback for the specified flavor of Tasks RCU.
 static void call_rcu_tasks_generic(struct rcu_head *rhp, rcu_callback_t func,
 				   struct rcu_tasks *rtp)
@@ -157,14 +281,282 @@ static void call_rcu_tasks_generic(struct rcu_head *rhp, rcu_callback_t func,
 
 	rhp->next = NULL;
 	rhp->func = func;
-	raw_spin_lock_irqsave(&rtp->cbs_lock, flags);
-	needwake = !rtp->cbs_head;
-	WRITE_ONCE(*rtp->cbs_tail, rhp);
-	rtp->cbs_tail = &rhp->next;
-	raw_spin_unlock_irqrestore(&rtp->cbs_lock, flags);
+	local_irq_save(flags);
+	rcu_read_lock();
+	ideal_cpu = smp_processor_id() >> READ_ONCE(rtp->percpu_enqueue_shift);
+	chosen_cpu = cpumask_next(ideal_cpu - 1, cpu_possible_mask);
+	rtpcp = per_cpu_ptr(rtp->rtpcpu, chosen_cpu);
+	if (!raw_spin_trylock_rcu_node(rtpcp)) { // irqs already disabled.
+		raw_spin_lock_rcu_node(rtpcp); // irqs already disabled.
+		j = jiffies;
+		if (rtpcp->rtp_jiffies != j) {
+			rtpcp->rtp_jiffies = j;
+			rtpcp->rtp_n_lock_retries = 0;
+		}
+		if (rcu_task_cb_adjust && ++rtpcp->rtp_n_lock_retries > rcu_task_contend_lim &&
+		    READ_ONCE(rtp->percpu_enqueue_lim) != rcu_task_cpu_ids)
+			needadjust = true;  // Defer adjustment to avoid deadlock.
+	}
+	if (!rcu_segcblist_is_enabled(&rtpcp->cblist)) {
+		raw_spin_unlock_rcu_node(rtpcp); // irqs remain disabled.
+		cblist_init_generic(rtp);
+		raw_spin_lock_rcu_node(rtpcp); // irqs already disabled.
+	}
+	needwake = rcu_segcblist_empty(&rtpcp->cblist);
+	rcu_segcblist_enqueue(&rtpcp->cblist, rhp);
+	raw_spin_unlock_irqrestore_rcu_node(rtpcp, flags);
+	if (unlikely(needadjust)) {
+		raw_spin_lock_irqsave(&rtp->cbs_gbl_lock, flags);
+		if (rtp->percpu_enqueue_lim != rcu_task_cpu_ids) {
+			WRITE_ONCE(rtp->percpu_enqueue_shift, 0);
+			WRITE_ONCE(rtp->percpu_dequeue_lim, rcu_task_cpu_ids);
+			smp_store_release(&rtp->percpu_enqueue_lim, rcu_task_cpu_ids);
+			pr_info("Switching %s to per-CPU callback queuing.\n", rtp->name);
+		}
+		raw_spin_unlock_irqrestore(&rtp->cbs_gbl_lock, flags);
+	}
+	rcu_read_unlock();
 	/* We can't create the thread unless interrupts are enabled. */
 	if (needwake && READ_ONCE(rtp->kthread_ptr))
-		wake_up(&rtp->cbs_wq);
+		irq_work_queue(&rtpcp->rtp_irq_work);
+}
+
+// RCU callback function for rcu_barrier_tasks_generic().
+static void rcu_barrier_tasks_generic_cb(struct rcu_head *rhp)
+{
+	struct rcu_tasks *rtp;
+	struct rcu_tasks_percpu *rtpcp;
+
+	rtpcp = container_of(rhp, struct rcu_tasks_percpu, barrier_q_head);
+	rtp = rtpcp->rtpp;
+	if (atomic_dec_and_test(&rtp->barrier_q_count))
+		complete(&rtp->barrier_q_completion);
+}
+
+// Wait for all in-flight callbacks for the specified RCU Tasks flavor.
+// Operates in a manner similar to rcu_barrier().
+static void rcu_barrier_tasks_generic(struct rcu_tasks *rtp)
+{
+	int cpu;
+	unsigned long flags;
+	struct rcu_tasks_percpu *rtpcp;
+	unsigned long s = rcu_seq_snap(&rtp->barrier_q_seq);
+
+	mutex_lock(&rtp->barrier_q_mutex);
+	if (rcu_seq_done(&rtp->barrier_q_seq, s)) {
+		smp_mb();
+		mutex_unlock(&rtp->barrier_q_mutex);
+		return;
+	}
+	rcu_seq_start(&rtp->barrier_q_seq);
+	init_completion(&rtp->barrier_q_completion);
+	atomic_set(&rtp->barrier_q_count, 2);
+	for_each_possible_cpu(cpu) {
+		if (cpu >= smp_load_acquire(&rtp->percpu_dequeue_lim))
+			break;
+		rtpcp = per_cpu_ptr(rtp->rtpcpu, cpu);
+		rtpcp->barrier_q_head.func = rcu_barrier_tasks_generic_cb;
+		raw_spin_lock_irqsave_rcu_node(rtpcp, flags);
+		if (rcu_segcblist_entrain(&rtpcp->cblist, &rtpcp->barrier_q_head))
+			atomic_inc(&rtp->barrier_q_count);
+		raw_spin_unlock_irqrestore_rcu_node(rtpcp, flags);
+	}
+	if (atomic_sub_and_test(2, &rtp->barrier_q_count))
+		complete(&rtp->barrier_q_completion);
+	wait_for_completion(&rtp->barrier_q_completion);
+	rcu_seq_end(&rtp->barrier_q_seq);
+	mutex_unlock(&rtp->barrier_q_mutex);
+}
+
+// Advance callbacks and indicate whether either a grace period or
+// callback invocation is needed.
+static int rcu_tasks_need_gpcb(struct rcu_tasks *rtp)
+{
+	int cpu;
+	unsigned long flags;
+	bool gpdone = poll_state_synchronize_rcu(rtp->percpu_dequeue_gpseq);
+	long n;
+	long ncbs = 0;
+	long ncbsnz = 0;
+	int needgpcb = 0;
+
+	for (cpu = 0; cpu < smp_load_acquire(&rtp->percpu_dequeue_lim); cpu++) {
+		if (!cpu_possible(cpu))
+			continue;
+		struct rcu_tasks_percpu *rtpcp = per_cpu_ptr(rtp->rtpcpu, cpu);
+
+		/* Advance and accelerate any new callbacks. */
+		if (!rcu_segcblist_n_cbs(&rtpcp->cblist))
+			continue;
+		raw_spin_lock_irqsave_rcu_node(rtpcp, flags);
+		// Should we shrink down to a single callback queue?
+		n = rcu_segcblist_n_cbs(&rtpcp->cblist);
+		if (n) {
+			ncbs += n;
+			if (cpu > 0)
+				ncbsnz += n;
+		}
+		rcu_segcblist_advance(&rtpcp->cblist, rcu_seq_current(&rtp->tasks_gp_seq));
+		(void)rcu_segcblist_accelerate(&rtpcp->cblist, rcu_seq_snap(&rtp->tasks_gp_seq));
+		if (rcu_segcblist_pend_cbs(&rtpcp->cblist))
+			needgpcb |= 0x3;
+		if (!rcu_segcblist_empty(&rtpcp->cblist))
+			needgpcb |= 0x1;
+		raw_spin_unlock_irqrestore_rcu_node(rtpcp, flags);
+	}
+
+	// Shrink down to a single callback queue if appropriate.
+	// This is done in two stages: (1) If there are no more than
+	// rcu_task_collapse_lim callbacks on CPU 0 and none on any other
+	// CPU, limit enqueueing to CPU 0.  (2) After an RCU grace period,
+	// if there has not been an increase in callbacks, limit dequeuing
+	// to CPU 0.  Note the matching RCU read-side critical section in
+	// call_rcu_tasks_generic().
+	if (rcu_task_cb_adjust && ncbs <= rcu_task_collapse_lim) {
+		raw_spin_lock_irqsave(&rtp->cbs_gbl_lock, flags);
+		if (rtp->percpu_enqueue_lim > 1) {
+			WRITE_ONCE(rtp->percpu_enqueue_shift, order_base_2(rcu_task_cpu_ids));
+			smp_store_release(&rtp->percpu_enqueue_lim, 1);
+			rtp->percpu_dequeue_gpseq = get_state_synchronize_rcu();
+			gpdone = false;
+			pr_info("Starting switch %s to CPU-0 callback queuing.\n", rtp->name);
+		}
+		raw_spin_unlock_irqrestore(&rtp->cbs_gbl_lock, flags);
+	}
+	if (rcu_task_cb_adjust && !ncbsnz && gpdone) {
+		raw_spin_lock_irqsave(&rtp->cbs_gbl_lock, flags);
+		if (rtp->percpu_enqueue_lim < rtp->percpu_dequeue_lim) {
+			WRITE_ONCE(rtp->percpu_dequeue_lim, 1);
+			pr_info("Completing switch %s to CPU-0 callback queuing.\n", rtp->name);
+		}
+		if (rtp->percpu_dequeue_lim == 1) {
+			for (cpu = rtp->percpu_dequeue_lim; cpu < rcu_task_cpu_ids; cpu++) {
+				if (!cpu_possible(cpu))
+					continue;
+				struct rcu_tasks_percpu *rtpcp = per_cpu_ptr(rtp->rtpcpu, cpu);
+
+				WARN_ON_ONCE(rcu_segcblist_n_cbs(&rtpcp->cblist));
+			}
+		}
+		raw_spin_unlock_irqrestore(&rtp->cbs_gbl_lock, flags);
+	}
+
+	return needgpcb;
+}
+
+// Advance callbacks and invoke any that are ready.
+static void rcu_tasks_invoke_cbs(struct rcu_tasks *rtp, struct rcu_tasks_percpu *rtpcp)
+{
+	int cpuwq;
+	unsigned long flags;
+	int len;
+	int index;
+	struct rcu_head *rhp;
+	struct rcu_cblist rcl = RCU_CBLIST_INITIALIZER(rcl);
+	struct rcu_tasks_percpu *rtpcp_next;
+
+	index = rtpcp->index * 2 + 1;
+	if (index < num_possible_cpus()) {
+		rtpcp_next = rtp->rtpcp_array[index];
+		if (rtpcp_next->cpu < smp_load_acquire(&rtp->percpu_dequeue_lim)) {
+			cpuwq = rcu_cpu_beenfullyonline(rtpcp_next->cpu) ? rtpcp_next->cpu : WORK_CPU_UNBOUND;
+			queue_work_on(cpuwq, system_wq, &rtpcp_next->rtp_work);
+			index++;
+			if (index < num_possible_cpus()) {
+				rtpcp_next = rtp->rtpcp_array[index];
+				if (rtpcp_next->cpu < smp_load_acquire(&rtp->percpu_dequeue_lim)) {
+					cpuwq = rcu_cpu_beenfullyonline(rtpcp_next->cpu) ? rtpcp_next->cpu : WORK_CPU_UNBOUND;
+					queue_work_on(cpuwq, system_wq, &rtpcp_next->rtp_work);
+				}
+			}
+		}
+	}
+
+	if (rcu_segcblist_empty(&rtpcp->cblist))
+		return;
+	raw_spin_lock_irqsave_rcu_node(rtpcp, flags);
+	rcu_segcblist_advance(&rtpcp->cblist, rcu_seq_current(&rtp->tasks_gp_seq));
+	rcu_segcblist_extract_done_cbs(&rtpcp->cblist, &rcl);
+	raw_spin_unlock_irqrestore_rcu_node(rtpcp, flags);
+	len = rcl.len;
+	for (rhp = rcu_cblist_dequeue(&rcl); rhp; rhp = rcu_cblist_dequeue(&rcl)) {
+		debug_rcu_head_callback(rhp);
+		local_bh_disable();
+		rhp->func(rhp);
+		local_bh_enable();
+		cond_resched();
+	}
+	raw_spin_lock_irqsave_rcu_node(rtpcp, flags);
+	rcu_segcblist_add_len(&rtpcp->cblist, -len);
+	(void)rcu_segcblist_accelerate(&rtpcp->cblist, rcu_seq_snap(&rtp->tasks_gp_seq));
+	raw_spin_unlock_irqrestore_rcu_node(rtpcp, flags);
+}
+
+// Workqueue flood to advance callbacks and invoke any that are ready.
+static void rcu_tasks_invoke_cbs_wq(struct work_struct *wp)
+{
+	struct rcu_tasks *rtp;
+	struct rcu_tasks_percpu *rtpcp = container_of(wp, struct rcu_tasks_percpu, rtp_work);
+
+	rtp = rtpcp->rtpp;
+	rcu_tasks_invoke_cbs(rtp, rtpcp);
+}
+
+// Wait for one grace period.
+static void rcu_tasks_one_gp(struct rcu_tasks *rtp, bool midboot)
+{
+	int needgpcb;
+
+	mutex_lock(&rtp->tasks_gp_mutex);
+
+	// If there were none, wait a bit and start over.
+	if (unlikely(midboot)) {
+		needgpcb = 0x2;
+	} else {
+		set_tasks_gp_state(rtp, RTGS_WAIT_CBS);
+		rcuwait_wait_event(&rtp->cbs_wait,
+				   (needgpcb = rcu_tasks_need_gpcb(rtp)),
+				   TASK_IDLE);
+	}
+
+	if (needgpcb & 0x2) {
+		// Wait for one grace period.
+		set_tasks_gp_state(rtp, RTGS_WAIT_GP);
+		rtp->gp_start = jiffies;
+		rcu_seq_start(&rtp->tasks_gp_seq);
+		rtp->gp_func(rtp);
+		rcu_seq_end(&rtp->tasks_gp_seq);
+	}
+
+	// Invoke callbacks.
+	set_tasks_gp_state(rtp, RTGS_INVOKE_CBS);
+	rcu_tasks_invoke_cbs(rtp, per_cpu_ptr(rtp->rtpcpu, 0));
+	mutex_unlock(&rtp->tasks_gp_mutex);
+}
+
+// RCU-tasks kthread that detects grace periods and invokes callbacks.
+static int __noreturn rcu_tasks_kthread(void *arg)
+{
+	struct rcu_tasks *rtp = arg;
+
+	/* Run on housekeeping CPUs by default.  Sysadm can move if desired. */
+	housekeeping_affine(current, HK_TYPE_RCU);
+	WRITE_ONCE(rtp->kthread_ptr, current); // Let GPs start!
+
+	/*
+	 * Each pass through the following loop makes one check for
+	 * newly arrived callbacks, and, if there are some, waits for
+	 * one RCU-tasks grace period and then invokes the callbacks.
+	 * This loop is terminated by the system going down.  ;-)
+	 */
+	for (;;) {
+		// Wait for one grace period and invoke any callbacks
+		// that are ready.
+		rcu_tasks_one_gp(rtp, false);
+
+		// Paranoid sleep to keep this from entering a tight loop.
+		schedule_timeout_idle(rtp->gp_sleep);
+	}
 }
 
 // Wait for a grace period for the specified flavor of Tasks RCU.

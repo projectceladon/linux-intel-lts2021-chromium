@@ -4299,7 +4299,7 @@ done:
 				inc_max_seq(lruvec, type, can_swap, force_scan);
 
 		VM_WARN_ON_ONCE(lruvec->mm_state.scan_seq != SCAN_ITER_FINISHING);
-		WRITE_ONCE(lruvec->mm_state.scan_seq, walk->scan_seq + 1);
+		WRITE_ONCE(lruvec->mm_state.scan_seq, scan_seq + 1);
 
 		kernfs_notify(lru_gen_admin_node);
 	}

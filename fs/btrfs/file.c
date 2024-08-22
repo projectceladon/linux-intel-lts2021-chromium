@@ -2404,10 +2404,7 @@ out:
 
 out_release_extents:
 	btrfs_release_log_ctx_extents(&ctx);
-	if (skip_ilock)
-		up_write(&inode->i_mmap_lock);
-	else
-		btrfs_inode_unlock(inode, BTRFS_ILOCK_MMAP);
+	btrfs_inode_unlock(inode, BTRFS_ILOCK_MMAP);
 	goto out;
 }
 

@@ -140,7 +140,7 @@ static int blk_ioctl_discard(struct block_device *bdev, fmode_t mode,
 		return -EINVAL;
 
 	filemap_invalidate_lock(inode->i_mapping);
-	err = truncate_bdev_range(bdev, mode, start, start + len - 1);
+	err = truncate_bdev_range(bdev, mode, start, end - 1);
 	if (err)
 		goto fail;
 
@@ -151,6 +151,38 @@ fail:
 	filemap_invalidate_unlock(inode->i_mapping);
 	return err;
 }
+
+static int blk_ioctl_secure_erase(struct block_device *bdev, fmode_t mode,
+		void __user *argp)
+{
+	uint64_t start, len, end;
+	uint64_t range[2];
+	int err;
+
+	if (!(mode & FMODE_WRITE))
+		return -EBADF;
+	if (!bdev_max_secure_erase_sectors(bdev))
+		return -EOPNOTSUPP;
+	if (copy_from_user(range, argp, sizeof(range)))
+		return -EFAULT;
+
+	start = range[0];
+	len = range[1];
+	if ((start & 511) || (len & 511))
+		return -EINVAL;
+	if (check_add_overflow(start, len, &end) ||
+	    end > bdev_nr_bytes(bdev))
+		return -EINVAL;
+
+	filemap_invalidate_lock(bdev->bd_inode->i_mapping);
+	err = truncate_bdev_range(bdev, mode, start, end - 1);
+	if (!err)
+		err = blkdev_issue_secure_erase(bdev, start >> 9, len >> 9,
+						GFP_KERNEL);
+	filemap_invalidate_unlock(bdev->bd_inode->i_mapping);
+	return err;
+}
+
 
 static int blk_ioctl_zeroout(struct block_device *bdev, fmode_t mode,
 		unsigned long arg)

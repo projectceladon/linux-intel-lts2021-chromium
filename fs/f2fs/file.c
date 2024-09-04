@@ -2632,6 +2632,12 @@ static int f2fs_defragment_range(struct f2fs_sb_info *sbi,
 
 	inode_lock(inode);
 
+	if (is_inode_flag_set(inode, FI_COMPRESS_RELEASED) ||
+		f2fs_is_atomic_file(inode)) {
+		err = -EINVAL;
+		goto unlock_out;
+	}
+
 	/* if in-place-update policy is enabled, don't waste time here */
 	set_inode_flag(inode, FI_OPU_WRITE);
 	if (f2fs_should_update_inplace(inode, NULL)) {
@@ -2853,6 +2859,11 @@ static int f2fs_move_file_range(struct file *file_in, loff_t pos_in,
 	if (f2fs_compressed_file(src) || f2fs_compressed_file(dst) ||
 		f2fs_is_pinned_file(src) || f2fs_is_pinned_file(dst)) {
 		ret = -EOPNOTSUPP;
+		goto out_unlock;
+	}
+
+	if (f2fs_is_atomic_file(src) || f2fs_is_atomic_file(dst)) {
+		ret = -EINVAL;
 		goto out_unlock;
 	}
 
@@ -3219,6 +3230,11 @@ static int f2fs_ioc_set_pin_file(struct file *filp, unsigned long arg)
 		return ret;
 
 	inode_lock(inode);
+
+	if (f2fs_is_atomic_file(inode)) {
+		ret = -EINVAL;
+		goto out;
+	}
 
 	if (!pin) {
 		clear_inode_flag(inode, FI_PIN_FILE);

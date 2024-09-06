@@ -204,8 +204,13 @@ mext_page_mkuptodate(struct page *page, unsigned from, unsigned to)
 				continue;
 			}
 		}
-		BUG_ON(nr >= MAX_BUF_PER_PAGE);
-		arr[nr++] = bh;
+		lock_buffer(bh);
+		if (buffer_uptodate(bh)) {
+			unlock_buffer(bh);
+			continue;
+		}
+		ext4_read_bh_nowait(bh, 0, NULL, false);
+		nr++;
 	}
 	/* No io required */
 	if (!nr)

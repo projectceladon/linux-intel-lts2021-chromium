@@ -1008,25 +1008,53 @@ static inline int cpufreq_table_count_valid_entries(const struct cpufreq_policy 
 	return count;
 }
 
-static inline int parse_perf_domain(int cpu, const char *list_name,
-				    const char *cell_name)
+/**
+ * cpufreq_table_set_inefficient() - Mark a frequency as inefficient
+ * @policy:     the &struct cpufreq_policy containing the inefficient frequency
+ * @frequency:  the inefficient frequency
+ *
+ * The &struct cpufreq_policy must use a sorted frequency table
+ *
+ * Return:      %0 on success or a negative errno code
+ */
+
+static inline int
+cpufreq_table_set_inefficient(struct cpufreq_policy *policy,
+                              unsigned int frequency)
 {
-	struct device_node *cpu_np;
-	struct of_phandle_args args;
+        struct cpufreq_frequency_table *pos;
+
+        /* Not supported */
+        if (policy->freq_table_sorted == CPUFREQ_TABLE_UNSORTED)
+                return -EINVAL;
+
+        cpufreq_for_each_valid_entry(pos, policy->freq_table) {
+                if (pos->frequency == frequency) {
+                        pos->flags |= CPUFREQ_INEFFICIENT_FREQ;
+                        policy->efficiencies_available = true;
+                        return 0;
+                }
+        }
+
+        return -EINVAL;
+}
+
+
+static inline int parse_perf_domain(int cpu, const char *list_name,
+				    const char *cell_name,
+				    struct of_phandle_args *args)
+{
 	int ret;
 
-	cpu_np = of_cpu_device_node_get(cpu);
+	struct device_node *cpu_np __free(device_node) = of_cpu_device_node_get(cpu);
 	if (!cpu_np)
 		return -ENODEV;
 
 	ret = of_parse_phandle_with_args(cpu_np, list_name, cell_name, 0,
-					 &args);
+					 args);
 	if (ret < 0)
 		return ret;
-
-	of_node_put(cpu_np);
-
-	return args.args[0];
+	return 0;
 }
 
 static inline int of_perf_domain_get_sharing_cpumask(int pcpu, const char *list_name,

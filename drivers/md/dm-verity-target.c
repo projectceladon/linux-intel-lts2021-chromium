@@ -728,7 +728,9 @@ static void verity_end_io(struct bio *bio)
 	struct dm_verity_io *io = bio->bi_private;
 
 	if (bio->bi_status &&
-	    (!verity_fec_is_enabled(io->v) || verity_is_system_shutting_down())) {
+	    (!verity_fec_is_enabled(io->v) ||
+	     verity_is_system_shutting_down() ||
+	     (bio->bi_opf & REQ_RAHEAD))) {
 		verity_finish_io(io, bio->bi_status);
 		return;
 	}
@@ -890,6 +892,9 @@ static void verity_status(struct dm_target *ti, status_type_t type,
 				DMEMIT("%02x", v->salt[x]);
 		if (v->mode != DM_VERITY_MODE_EIO)
 			args++;
+		if (v->error_behavior >= DM_VERITY_ERROR_BEHAVIOR_EIO &&
+		    v->error_behavior <= DM_VERITY_ERROR_BEHAVIOR_NOTIFY)
+			args += 2;
 		if (verity_fec_is_enabled(v))
 			args += DM_VERITY_OPTS_FEC;
 		if (v->zero_digest)
@@ -917,6 +922,9 @@ static void verity_status(struct dm_target *ti, status_type_t type,
 				BUG();
 			}
 		}
+		if (v->error_behavior >= DM_VERITY_ERROR_BEHAVIOR_EIO &&
+		    v->error_behavior <= DM_VERITY_ERROR_BEHAVIOR_NOTIFY)
+			DMEMIT(" " DM_VERITY_OPT_ERROR_BEHAVIOR " %d", v->error_behavior);
 		if (v->zero_digest)
 			DMEMIT(" " DM_VERITY_OPT_IGN_ZEROES);
 		if (v->validated_blocks)
@@ -1610,14 +1618,6 @@ bad:
 }
 
 /*
- * Check whether a DM target is a verity target.
- */
-bool dm_is_verity_target(struct dm_target *ti)
-{
-	return ti->type->module == THIS_MODULE;
-}
-
-/*
  * Get the verity mode (error behavior) of a verity target.
  *
  * Returns the verity mode of the target, or -EINVAL if 'ti' is not a verity
@@ -1687,6 +1687,14 @@ static void __exit dm_verity_exit(void)
 
 module_init(dm_verity_init);
 module_exit(dm_verity_exit);
+
+/*
+ * Check whether a DM target is a verity target.
+ */
+bool dm_is_verity_target(struct dm_target *ti)
+{
+	return ti->type == &verity_target;
+}
 
 MODULE_AUTHOR("Mikulas Patocka <mpatocka@redhat.com>");
 MODULE_AUTHOR("Mandeep Baines <msb@chromium.org>");

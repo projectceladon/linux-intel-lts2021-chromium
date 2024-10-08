@@ -37,6 +37,8 @@
 #include "internal.h"
 #include <trace/hooks/syscall_check.h>
 
+#include <trace/events/cros_file.h>
+
 int do_truncate(struct user_namespace *mnt_userns, struct dentry *dentry,
 		loff_t length, unsigned int time_attrs, struct file *filp)
 {
@@ -189,7 +191,7 @@ long do_sys_ftruncate(unsigned int fd, loff_t length, int small)
 	if (IS_APPEND(file_inode(f.file)))
 		goto out_putf;
 	sb_start_write(inode->i_sb);
-	error = security_path_truncate(&f.file->f_path);
+	error = security_file_truncate(f.file);
 	if (!error)
 		error = do_truncate(file_mnt_user_ns(f.file), dentry, length,
 				    ATTR_MTIME | ATTR_CTIME, f.file);
@@ -200,13 +202,13 @@ out:
 	return error;
 }
 
-SYSCALL_DEFINE2(ftruncate, unsigned int, fd, unsigned long, length)
+SYSCALL_DEFINE2(ftruncate, unsigned int, fd, off_t, length)
 {
 	return do_sys_ftruncate(fd, length, 1);
 }
 
 #ifdef CONFIG_COMPAT
-COMPAT_SYSCALL_DEFINE2(ftruncate, unsigned int, fd, compat_ulong_t, length)
+COMPAT_SYSCALL_DEFINE2(ftruncate, unsigned int, fd, compat_off_t, length)
 {
 	return do_sys_ftruncate(fd, length, 1);
 }
@@ -570,9 +572,12 @@ int chmod_common(const struct path *path, umode_t mode)
 	struct iattr newattrs;
 	int error;
 
+	trace_cros_chmod_common_enter(path, mode);
 	error = mnt_want_write(path->mnt);
-	if (error)
+	if (error) {
+		trace_cros_chmod_common_exit(path, mode, error);
 		return error;
+	}
 retry_deleg:
 	inode_lock(inode);
 	error = security_path_chmod(path, mode);
@@ -590,6 +595,7 @@ out_unlock:
 			goto retry_deleg;
 	}
 	mnt_drop_write(path->mnt);
+	trace_cros_chmod_common_exit(path, mode, error);
 	return error;
 }
 
@@ -649,6 +655,7 @@ int chown_common(const struct path *path, uid_t user, gid_t group)
 	struct iattr newattrs;
 	kuid_t uid;
 	kgid_t gid;
+	trace_cros_chown_common_enter(path, user, group);
 
 	uid = make_kuid(current_user_ns(), user);
 	gid = make_kgid(current_user_ns(), group);
@@ -661,14 +668,18 @@ int chown_common(const struct path *path, uid_t user, gid_t group)
 retry_deleg:
 	newattrs.ia_valid =  ATTR_CTIME;
 	if (user != (uid_t) -1) {
-		if (!uid_valid(uid))
+		if (!uid_valid(uid)) {
+			trace_cros_chown_common_exit(path, user, group, -EINVAL);
 			return -EINVAL;
+		}
 		newattrs.ia_valid |= ATTR_UID;
 		newattrs.ia_uid = uid;
 	}
 	if (group != (gid_t) -1) {
-		if (!gid_valid(gid))
+		if (!gid_valid(gid)) {
+			trace_cros_chown_common_exit(path, user, group, -EINVAL);
 			return -EINVAL;
+		}
 		newattrs.ia_valid |= ATTR_GID;
 		newattrs.ia_gid = gid;
 	}
@@ -686,6 +697,7 @@ retry_deleg:
 		if (!error)
 			goto retry_deleg;
 	}
+	trace_cros_chown_common_exit(path, user, group, error);
 	return error;
 }
 
@@ -981,6 +993,48 @@ struct file *dentry_open(const struct path *path, int flags,
 }
 EXPORT_SYMBOL(dentry_open);
 
+/**
+ * dentry_create - Create and open a file
+ * @path: path to create
+ * @flags: O_ flags
+ * @mode: mode bits for new file
+ * @cred: credentials to use
+ *
+ * Caller must hold the parent directory's lock, and have prepared
+ * a negative dentry, placed in @path->dentry, for the new file.
+ *
+ * Caller sets @path->mnt to the vfsmount of the filesystem where
+ * the new file is to be created. The parent directory and the
+ * negative dentry must reside on the same filesystem instance.
+ *
+ * On success, returns a "struct file *". Otherwise a ERR_PTR
+ * is returned.
+ */
+struct file *dentry_create(const struct path *path, int flags, umode_t mode,
+			   const struct cred *cred)
+{
+	struct file *f;
+	int error;
+
+	validate_creds(cred);
+	f = alloc_empty_file(flags, cred);
+	if (IS_ERR(f))
+		return f;
+
+	error = vfs_create(mnt_user_ns(path->mnt),
+			   d_inode(path->dentry->d_parent),
+			   path->dentry, mode, true);
+	if (!error)
+		error = vfs_open(path, f);
+
+	if (unlikely(error)) {
+		fput(f);
+		return ERR_PTR(error);
+	}
+	return f;
+}
+EXPORT_SYMBOL(dentry_create);
+
 struct file *open_with_fake_path(const struct path *path, int flags,
 				struct inode *inode, const struct cred *cred)
 {
@@ -1128,7 +1182,7 @@ inline int build_open_flags(const struct open_how *how, struct open_flags *op)
 		lookup_flags |= LOOKUP_IN_ROOT;
 	if (how->resolve & RESOLVE_CACHED) {
 		/* Don't bother even trying for create/truncate/tmpfile open */
-		if (flags & (O_TRUNC | O_CREAT | O_TMPFILE))
+		if (flags & (O_TRUNC | O_CREAT | __O_TMPFILE))
 			return -EAGAIN;
 		lookup_flags |= LOOKUP_CACHED;
 	}
@@ -1335,6 +1389,7 @@ int filp_close(struct file *filp, fl_owner_t id)
 
 	if (!file_count(filp)) {
 		printk(KERN_ERR "VFS: Close: file count is 0\n");
+		trace_cros_filp_close_exit(filp, id, 0);
 		return 0;
 	}
 
@@ -1346,6 +1401,7 @@ int filp_close(struct file *filp, fl_owner_t id)
 		locks_remove_posix(filp, id);
 	}
 	fput(filp);
+	trace_cros_filp_close_exit(filp, id, retval);
 	return retval;
 }
 

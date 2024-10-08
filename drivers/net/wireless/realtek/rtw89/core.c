@@ -2372,9 +2372,6 @@ void rtw89_roc_start(struct rtw89_dev *rtwdev, struct rtw89_vif *rtwvif)
 
 	lockdep_assert_held(&rtwdev->mutex);
 
-	ieee80211_queue_delayed_work(hw, &rtwvif->roc.roc_work,
-				     msecs_to_jiffies(rtwvif->roc.duration));
-
 	rtw89_leave_ips_by_hwflags(rtwdev);
 	rtw89_leave_lps(rtwdev);
 
@@ -2395,6 +2392,9 @@ void rtw89_roc_start(struct rtw89_dev *rtwdev, struct rtw89_vif *rtwvif)
 			  B_AX_A_UC_CAM_MATCH | B_AX_A_BC_CAM_MATCH);
 
 	ieee80211_ready_on_channel(hw);
+	cancel_delayed_work(&rtwvif->roc.roc_work);
+	ieee80211_queue_delayed_work(hw, &rtwvif->roc.roc_work,
+				     msecs_to_jiffies(rtwvif->roc.duration));
 }
 
 void rtw89_roc_end(struct rtw89_dev *rtwdev, struct rtw89_vif *rtwvif)
@@ -2778,6 +2778,8 @@ int rtw89_core_sta_add(struct rtw89_dev *rtwdev,
 	if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls) {
 		/* for station mode, assign the mac_id from itself */
 		rtwsta->mac_id = rtwvif->mac_id;
+		/* must do rtw89_reg_6ghz_power_recalc() before rfk channel */
+		rtw89_reg_6ghz_power_recalc(rtwdev, rtwvif, true);
 		rtw89_btc_ntfy_role_info(rtwdev, rtwvif, rtwsta,
 					 BTC_ROLE_MSTS_STA_CONN_START);
 		rtw89_chip_rfk_channel(rtwdev);
@@ -2951,10 +2953,11 @@ int rtw89_core_sta_remove(struct rtw89_dev *rtwdev,
 	struct rtw89_sta *rtwsta = (struct rtw89_sta *)sta->drv_priv;
 	int ret;
 
-	if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls)
+	if (vif->type == NL80211_IFTYPE_STATION && !sta->tdls) {
+		rtw89_reg_6ghz_power_recalc(rtwdev, rtwvif, false);
 		rtw89_btc_ntfy_role_info(rtwdev, rtwvif, rtwsta,
 					 BTC_ROLE_MSTS_STA_DIS_CONN);
-	else if (vif->type == NL80211_IFTYPE_AP || sta->tdls) {
+	} else if (vif->type == NL80211_IFTYPE_AP || sta->tdls) {
 		rtw89_core_release_bit_map(rtwdev->mac_id_map, rtwsta->mac_id);
 
 		ret = rtw89_fw_h2c_role_maintain(rtwdev, rtwvif, rtwsta,
@@ -3592,6 +3595,28 @@ static void rtw89_core_setup_phycap(struct rtw89_dev *rtwdev)
 		rtwdev->chip->chip_id == RTL8852A && rtwdev->hal.cv <= CHIP_CBV;
 }
 
+static void rtw89_core_setup_rfe_parms(struct rtw89_dev *rtwdev)
+{
+	const struct rtw89_chip_info *chip = rtwdev->chip;
+	const struct rtw89_rfe_parms_conf *conf = chip->rfe_parms_conf;
+	struct rtw89_efuse *efuse = &rtwdev->efuse;
+	u8 rfe_type = efuse->rfe_type;
+
+	if (!conf)
+		goto out;
+
+	while (conf->rfe_parms) {
+		if (rfe_type == conf->rfe_type) {
+			rtwdev->rfe_parms = conf->rfe_parms;
+			return;
+		}
+		conf++;
+	}
+
+out:
+	rtwdev->rfe_parms = chip->dflt_parms;
+}
+
 static int rtw89_chip_efuse_info_setup(struct rtw89_dev *rtwdev)
 {
 	int ret;
@@ -3613,6 +3638,7 @@ static int rtw89_chip_efuse_info_setup(struct rtw89_dev *rtwdev)
 		return ret;
 
 	rtw89_core_setup_phycap(rtwdev);
+	rtw89_core_setup_rfe_parms(rtwdev);
 
 	rtw89_mac_pwr_off(rtwdev);
 

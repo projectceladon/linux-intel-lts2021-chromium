@@ -511,7 +511,7 @@ struct snd_pcm_str {
 #endif
 #endif
 	struct snd_kcontrol *chmap_kctl; /* channel-mapping controls */
-	struct device dev;
+	struct device *dev;
 	ANDROID_KABI_RESERVE(1);
 };
 

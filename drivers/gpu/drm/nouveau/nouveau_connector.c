@@ -967,7 +967,7 @@ nouveau_connector_get_modes(struct drm_connector *connector)
 	/* Determine display colour depth for everything except LVDS now,
 	 * DP requires this before mode_valid() is called.
 	 */
-	if (connector->connector_type != DRM_MODE_CONNECTOR_LVDS && nv_connector->native_mode)
+	if (connector->connector_type != DRM_MODE_CONNECTOR_LVDS)
 		nouveau_connector_detect_depth(connector);
 
 	/* Find the native mode if this is a digital panel, if we didn't
@@ -980,6 +980,9 @@ nouveau_connector_get_modes(struct drm_connector *connector)
 		struct drm_display_mode *mode;
 
 		mode = drm_mode_duplicate(dev, nv_connector->native_mode);
+		if (!mode)
+			return 0;
+
 		drm_mode_probed_add(connector, mode);
 		ret = 1;
 	}
@@ -1163,17 +1166,19 @@ nouveau_connector_funcs_lvds = {
 };
 
 void
-nouveau_connector_hpd(struct drm_connector *connector)
+nouveau_connector_hpd(struct nouveau_connector *nv_connector, u64 bits)
 {
-	struct nouveau_drm *drm = nouveau_drm(connector->dev);
-	u32 mask = drm_connector_mask(connector);
+	struct nouveau_drm *drm = nouveau_drm(nv_connector->base.dev);
+	u32 mask = drm_connector_mask(&nv_connector->base);
+	unsigned long flags;
 
-	mutex_lock(&drm->hpd_lock);
+	spin_lock_irqsave(&drm->hpd_lock, flags);
 	if (!(drm->hpd_pending & mask)) {
+		nv_connector->hpd_pending |= bits;
 		drm->hpd_pending |= mask;
 		schedule_work(&drm->hpd_work);
 	}
-	mutex_unlock(&drm->hpd_lock);
+	spin_unlock_irqrestore(&drm->hpd_lock, flags);
 }
 
 static int
@@ -1185,15 +1190,13 @@ nouveau_connector_hotplug(struct nvif_notify *notify)
 	struct drm_device *dev = connector->dev;
 	struct nouveau_drm *drm = nouveau_drm(dev);
 	const struct nvif_notify_conn_rep_v0 *rep = notify->data;
-	bool plugged = (rep->mask != NVIF_NOTIFY_CONN_V0_UNPLUG);
 
 	if (rep->mask & NVIF_NOTIFY_CONN_V0_IRQ) {
 		nouveau_dp_irq(drm, nv_connector);
 		return NVIF_NOTIFY_KEEP;
 	}
 
-	NV_DEBUG(drm, "%splugged %s\n", plugged ? "" : "un", connector->name);
-	nouveau_connector_hpd(connector);
+	nouveau_connector_hpd(nv_connector, rep->mask);
 
 	return NVIF_NOTIFY_KEEP;
 }

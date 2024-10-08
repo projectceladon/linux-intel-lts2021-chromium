@@ -2,7 +2,7 @@
 /*
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2022 Intel Corporation
+ * Copyright (C) 2018-2024 Intel Corporation
  */
 #ifndef __iwl_fw_api_commands_h__
 #define __iwl_fw_api_commands_h__
@@ -25,12 +25,16 @@
  * @NAN_GROUP: NAN group, uses command IDs from &enum iwl_nan_subcmd_ids
  * @LOCATION_GROUP: location group, uses command IDs from
  *	&enum iwl_location_subcmd_ids
+ * @BT_COEX_GROUP: bt coex group, uses command IDs from
+ *	&enum iwl_bt_coex_subcmd_ids
  * @PROT_OFFLOAD_GROUP: protocol offload group, uses command IDs from
  *	&enum iwl_prot_offload_subcmd_ids
  * @REGULATORY_AND_NVM_GROUP: regulatory/NVM group, uses command IDs from
  *	&enum iwl_regulatory_and_nvm_subcmd_ids
  * @XVT_GROUP: XVT group, uses command IDs from &enum iwl_xvt_subcmd_ids
  * @DEBUG_GROUP: Debug group, uses command IDs from &enum iwl_debug_cmds
+ * @STATISTICS_GROUP: Statistics group, uses command IDs from
+ *	&enum iwl_statistics_subcmd_ids
  */
 enum iwl_mvm_command_groups {
 	LEGACY_GROUP = 0x0,
@@ -42,10 +46,12 @@ enum iwl_mvm_command_groups {
 	SCAN_GROUP = 0x6,
 	NAN_GROUP = 0x7,
 	LOCATION_GROUP = 0x8,
+	BT_COEX_GROUP = 0x9,
 	PROT_OFFLOAD_GROUP = 0xb,
 	REGULATORY_AND_NVM_GROUP = 0xc,
 	XVT_GROUP = 0xe,
 	DEBUG_GROUP = 0xf,
+	STATISTICS_GROUP = 0x10,
 };
 
 /**
@@ -269,10 +275,10 @@ enum iwl_legacy_cmds {
 
 	/**
 	 * @WNM_80211V_TIMING_MEASUREMENT_NOTIFICATION: Time Sync
-	 *	measurement notification for TM/FTM. Sent on receipt of respective
-	 *	WNM action frame for TM protocol or public action frame for FTM
-	 *	protocol from peer device along with additional meta data specified in
-	 *	&struct iwl_time_msmt_notify
+	 *	measurement notification for TM/FTM. Sent on receipt of
+	 *	respective WNM action frame for TM protocol or public action
+	 *	frame for FTM protocol from peer device along with additional
+	 *	meta data specified in &struct iwl_time_msmt_notify
 	 */
 	WNM_80211V_TIMING_MEASUREMENT_NOTIFICATION = 0x67,
 
@@ -471,7 +477,7 @@ enum iwl_legacy_cmds {
 	MARKER_CMD = 0xcb,
 
 	/**
-	 * @BT_PROFILE_NOTIFICATION: &struct iwl_bt_coex_profile_notif
+	 * @BT_PROFILE_NOTIFICATION: &struct iwl_bt_coex_prof_old_notif
 	 */
 	BT_PROFILE_NOTIFICATION = 0xce,
 
@@ -629,9 +635,19 @@ enum iwl_system_subcmd_ids {
 	SYSTEM_FEATURES_CONTROL_CMD = 0xd,
 
 	/**
-	 * @RFI_DEACTIVATE_NOTIF: &struct iwl_rfi_deactivate_notif
+	 * @SYSTEM_STATISTICS_CMD: &struct iwl_system_statistics_cmd
 	 */
-	RFI_DEACTIVATE_NOTIF = 0xff,
+	SYSTEM_STATISTICS_CMD = 0xf,
+
+	/**
+	 * @SYSTEM_STATISTICS_END_NOTIF: &struct iwl_system_statistics_end_notif
+	 */
+	SYSTEM_STATISTICS_END_NOTIF = 0xfd,
+
+	/**
+	 * @RFI_SUPPORT_NOTIF: &struct iwl_rfi_support_notif
+	 */
+	RFI_SUPPORT_NOTIF = 0xff,
 };
 
 /**
@@ -670,6 +686,38 @@ enum iwl_xvt_subcmd_ids {
 	 * Handled by user space component
 	 */
 	IQ_CALIB_CONFIG_NOTIF = 0xFF,
+};
+
+/**
+ * enum iwl_statistics_subcmd_ids - Statistics group command IDs
+ */
+enum iwl_statistics_subcmd_ids {
+	/**
+	 * @STATISTICS_OPER_NOTIF: Notification about operational
+	 *	statistics &struct iwl_system_statistics_notif_oper
+	 */
+	STATISTICS_OPER_NOTIF = 0x0,
+
+	/**
+	 * @STATISTICS_OPER_PART1_NOTIF: Notification about operational part1
+	 *	statistics &struct iwl_system_statistics_part1_notif_oper
+	 */
+	STATISTICS_OPER_PART1_NOTIF = 0x1,
+
+	/**
+	 * @STATISTICS_OPER_PART2_NOTIF: Notification about operational part2
+	 */
+	STATISTICS_OPER_PART2_NOTIF = 0x2,
+
+	/**
+	 * @STATISTICS_OPER_PART3_NOTIF: Notification about operational part3
+	 */
+	STATISTICS_OPER_PART3_NOTIF = 0x3,
+
+	/**
+	 * @STATISTICS_OPER_PART4_NOTIF: Notification about operational part4
+	 */
+	STATISTICS_OPER_PART4_NOTIF = 0x4,
 };
 
 #endif /* __iwl_fw_api_commands_h__ */

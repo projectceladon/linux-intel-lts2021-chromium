@@ -83,7 +83,7 @@ struct discovery_state {
 	u8			last_adv_addr_type;
 	s8			last_adv_rssi;
 	u32			last_adv_flags;
-	u8			last_adv_data[HCI_MAX_AD_LENGTH];
+	u8			last_adv_data[HCI_MAX_EXT_AD_LENGTH];
 	u8			last_adv_data_len;
 	bool			report_invalid_rssi;
 	bool			result_filtering;
@@ -275,7 +275,7 @@ struct adv_pattern {
 	__u8 ad_type;
 	__u8 offset;
 	__u8 length;
-	__u8 value[HCI_MAX_AD_LENGTH];
+	__u8 value[HCI_MAX_EXT_AD_LENGTH];
 };
 
 struct adv_rssi_thresholds {
@@ -321,6 +321,9 @@ struct adv_monitor {
 /* Default authenticated payload timeout 30s */
 #define DEFAULT_AUTH_PAYLOAD_TIMEOUT   0x0bb8
 
+/* CHROMIUM ONLY: Default disconnect timeout when powering off or suspending (300ms) */
+#define DEFAULT_DISCON_TIMEOUT_ON_POWEROFF	300
+
 struct amp_assoc {
 	__u16	len;
 	__u16	offset;
@@ -335,7 +338,7 @@ struct hci_dev {
 	struct list_head list;
 	struct mutex	lock;
 
-	char		name[8];
+	const char	*name;
 	unsigned long	flags;
 	__u16		id;
 	__u8		bus;
@@ -574,9 +577,7 @@ struct hci_dev {
 	const char		*fw_info;
 	struct dentry		*debugfs;
 
-#ifdef CONFIG_DEV_COREDUMP
 	struct hci_devcoredump	dump;
-#endif
 
 	struct device		dev;
 
@@ -660,6 +661,7 @@ struct hci_dev {
 	bool (*is_quality_report_evt)(struct sk_buff *skb);
 	bool (*pull_quality_report_data)(struct sk_buff *skb);
 	void (*do_wakeup)(struct hci_dev *hdev);
+	void (*clear_wakeup)(struct hci_dev *hdev);
 };
 
 #define HCI_PHY_HANDLE(handle)	(handle & 0xff)
@@ -713,7 +715,7 @@ struct hci_conn {
 	__u16		le_conn_interval;
 	__u16		le_conn_latency;
 	__u16		le_supv_timeout;
-	__u8		le_adv_data[HCI_MAX_AD_LENGTH];
+	__u8		le_adv_data[HCI_MAX_EXT_AD_LENGTH];
 	__u8		le_adv_data_len;
 	__u8		le_tx_phy;
 	__u8		le_rx_phy;
@@ -754,6 +756,7 @@ struct hci_conn {
 
 	struct hci_conn	*link;
 	struct bt_codec codec;
+	__u8		force_retrans_effort;
 
 	void (*connect_cfm_cb)	(struct hci_conn *conn, u8 status);
 	void (*security_cfm_cb)	(struct hci_conn *conn, u8 status);
@@ -800,10 +803,11 @@ struct hci_conn_params {
 
 	struct hci_conn *conn;
 	bool explicit_connect;
-
-	ANDROID_KABI_RESERVE(1);
+	/* Accessed without hdev->lock: */
 	hci_conn_flags_t flags;
 	u8  privacy_mode;
+
+	ANDROID_KABI_RESERVE(1);
 };
 
 extern struct list_head hci_dev_list;
@@ -915,7 +919,6 @@ void hci_inquiry_cache_flush(struct hci_dev *hdev);
 /* ----- HCI Connections ----- */
 enum {
 	HCI_CONN_AUTH_PEND,
-	HCI_CONN_REAUTH_PEND,
 	HCI_CONN_ENCRYPT_PEND,
 	HCI_CONN_RSWITCH_PEND,
 	HCI_CONN_MODE_CHANGE_PEND,
@@ -933,6 +936,7 @@ enum {
 	HCI_CONN_STK_ENCRYPT,
 	HCI_CONN_AUTH_INITIATOR,
 	HCI_CONN_DROP,
+	HCI_CONN_CANCEL,
 	HCI_CONN_PARAM_REMOVAL_PEND,
 	HCI_CONN_NEW_LINK_KEY,
 	HCI_CONN_SCANNING,
@@ -1148,6 +1152,38 @@ static inline struct hci_conn *hci_lookup_le_connect(struct hci_dev *hdev)
 	rcu_read_unlock();
 
 	return NULL;
+}
+
+/* CHROMIUM only: Check if a new le connection will conflict with an ongoing
+ * connection attempt.
+ */
+static inline bool hci_lookup_le_conn_conflict(struct hci_dev *hdev)
+{
+	struct hci_conn_hash *h = &hdev->conn_hash;
+	struct hci_conn  *c;
+
+	rcu_read_lock();
+
+	list_for_each_entry_rcu(c, &h->list, list) {
+		/* Not conflicting if not in connecting state */
+		if (c->state != BT_CONNECT)
+			continue;
+
+		/* If peer is LE, in connecting state, and we're scanning, it
+		 * means we are currently looking for this device.
+		 */
+		if (c->type == LE_LINK &&
+			test_bit(HCI_CONN_SCANNING, &c->flags)) {
+			continue;
+		}
+
+		rcu_read_unlock();
+		return true;
+	}
+
+	rcu_read_unlock();
+
+	return false;
 }
 
 int hci_disconnect(struct hci_conn *conn, __u8 reason);
@@ -1387,7 +1423,11 @@ struct hci_conn_params *hci_conn_params_add(struct hci_dev *hdev,
 					    bdaddr_t *addr, u8 addr_type);
 void hci_conn_params_del(struct hci_dev *hdev, bdaddr_t *addr, u8 addr_type);
 void hci_conn_params_clear_disabled(struct hci_dev *hdev);
+void hci_conn_params_free(struct hci_conn_params *param);
 
+void hci_pend_le_list_del_init(struct hci_conn_params *param);
+void hci_pend_le_list_add(struct hci_conn_params *param,
+			  struct list_head *list);
 struct hci_conn_params *hci_pend_le_action_lookup(struct list_head *list,
 						  bdaddr_t *addr,
 						  u8 addr_type);
@@ -1461,6 +1501,7 @@ void hci_conn_add_sysfs(struct hci_conn *conn);
 void hci_conn_del_sysfs(struct hci_conn *conn);
 
 #define SET_HCIDEV_DEV(hdev, pdev) ((hdev)->dev.parent = (pdev))
+#define GET_HCIDEV_DEV(hdev) ((hdev)->dev.parent)
 
 /* ----- LMP capabilities ----- */
 #define lmp_encrypt_capable(dev)   ((dev)->features[0][0] & LMP_ENCRYPT)
@@ -1540,6 +1581,10 @@ void hci_conn_del_sysfs(struct hci_conn *conn);
 
 /* Extended advertising support */
 #define ext_adv_capable(dev) (((dev)->le_features[1] & HCI_LE_EXT_ADV))
+
+/* Maximum advertising length */
+#define max_adv_len(dev) \
+	(ext_adv_capable(dev) ? HCI_MAX_EXT_AD_LENGTH : HCI_MAX_AD_LENGTH)
 
 /* BLUETOOTH CORE SPECIFICATION Version 5.3 | Vol 4, Part E page 1789:
  *
@@ -1776,18 +1821,46 @@ static inline int hci_check_conn_params(u16 min, u16 max, u16 latency,
 {
 	u16 max_latency;
 
-	if (min > max || min < 6 || max > 3200)
+	if (min > max) {
+		BT_WARN("min %d > max %d", min, max);
 		return -EINVAL;
+	}
 
-	if (to_multiplier < 10 || to_multiplier > 3200)
+	if (min < 6) {
+		BT_WARN("min %d < 6", min);
 		return -EINVAL;
+	}
 
-	if (max >= to_multiplier * 8)
+	if (max > 3200) {
+		BT_WARN("max %d > 3200", max);
 		return -EINVAL;
+	}
+
+	if (to_multiplier < 10) {
+		BT_WARN("to_multiplier %d < 10", to_multiplier);
+		return -EINVAL;
+	}
+
+	if (to_multiplier > 3200) {
+		BT_WARN("to_multiplier %d > 3200", to_multiplier);
+		return -EINVAL;
+	}
+
+	if (max >= to_multiplier * 8) {
+		BT_WARN("max %d >= to_multiplier %d * 8", max, to_multiplier);
+		return -EINVAL;
+	}
 
 	max_latency = (to_multiplier * 4 / max) - 1;
-	if (latency > 499 || latency > max_latency)
+	if (latency > 499) {
+		BT_WARN("latency %d > 499", latency);
 		return -EINVAL;
+	}
+
+	if (latency > max_latency) {
+		BT_WARN("latency %d > max_latency %d", latency, max_latency);
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -1945,6 +2018,7 @@ void mgmt_adv_monitor_device_lost(struct hci_dev *hdev, u16 handle,
 int mgmt_quality_report(struct hci_dev *hdev, struct sk_buff *skb,
 			u8 quality_spec);
 
+int hci_abort_conn(struct hci_conn *conn, u8 reason);
 u8 hci_le_conn_update(struct hci_conn *conn, u16 min, u16 max, u16 latency,
 		      u16 to_multiplier);
 void hci_le_start_enc(struct hci_conn *conn, __le16 ediv, __le64 rand,
@@ -1962,4 +2036,6 @@ void hci_copy_identity_address(struct hci_dev *hdev, bdaddr_t *bdaddr,
 
 #define TRANSPORT_TYPE_MAX	0x04
 
+/* An arbitrarily invalid number for SCO retransmission effort */
+#define SCO_NO_FORCE_RETRANS_EFFORT	0x3F
 #endif /* __HCI_CORE_H */

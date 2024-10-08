@@ -385,6 +385,7 @@ enum {
 	LRU_GEN_MM_WALK,
 	LRU_GEN_NONLEAF_YOUNG,
 	LRU_GEN_SPTE_WALK,
+	LRU_GEN_ADVANCE_IN_LOCKSTEP,
 	NR_LRU_GEN_CAPS
 };
 
@@ -399,22 +400,19 @@ enum {
 #endif
 
 /*
- * The youngest generation number is stored in max_seq for both anon and file
- * types as they are aged on an equal footing. The oldest generation numbers are
- * stored in min_seq[] separately for anon and file types as clean file pages
- * can be evicted regardless of swap constraints.
+ * The youngest generation numbers are stored in max_seq[], and the oldest
+ * generation numbers are stored in min_seq[].
  *
- * Normally anon and file min_seq are in sync. But if swapping is constrained,
- * e.g., out of swap space, file min_seq is allowed to advance and leave anon
- * min_seq behind.
+ * The number of pages in each generation is eventually consistent and therefore
+ * can be transiently negative when reset_batch_size() is pending.
  */
 struct lru_gen_page {
 	/* the aging increments the youngest generation number */
-	unsigned long max_seq;
+	unsigned long max_seq[ANON_AND_FILE];
 	/* the eviction increments the oldest generation numbers */
 	unsigned long min_seq[ANON_AND_FILE];
 	/* the birth time of each generation in jiffies */
-	unsigned long timestamps[MAX_NR_GENS];
+	unsigned long timestamps[MAX_NR_GENS][ANON_AND_FILE];
 	/* the multi-gen LRU lists, lazily sorted on eviction */
 	struct list_head pages[MAX_NR_GENS][ANON_AND_FILE][MAX_NR_ZONES];
 	/* the multi-gen LRU sizes, eventually consistent */
@@ -425,9 +423,26 @@ struct lru_gen_page {
 	unsigned long avg_total[ANON_AND_FILE][MAX_NR_TIERS];
 	/* the first tier doesn't need protection, hence the minus one */
 	unsigned long protected[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS - 1];
+	/*
+	 * When min_seq is incremented, records the min_seq of the opposite
+	 * type. Used for tracking refaulted_victims.
+	 */
+	unsigned long victim_seq[NR_HIST_GENS][ANON_AND_FILE];
+	/* the approximate size of the new oldest generation when min_seq is incremented */
+	unsigned long oldest_gen_size[NR_HIST_GENS][ANON_AND_FILE];
+
 	/* can be modified without holding the LRU lock */
 	atomic_long_t evicted[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS];
 	atomic_long_t refaulted[NR_HIST_GENS][ANON_AND_FILE][MAX_NR_TIERS];
+	/*
+	 * A refaulted victim of a given page is a page that was evicted
+	 * to save the given page, but which later gets refaulted. This
+	 * indicates an incorrect decision by the eviction logic. For the
+	 * oldest generation of a given type, refautled_victims estimate
+	 * the number of refaulted victims of the opposite type.
+	 */
+	atomic_long_t refaulted_victims[NR_HIST_GENS][ANON_AND_FILE];
+
 	/* whether the multi-gen LRU is enabled */
 	bool enabled;
 #ifdef CONFIG_MEMCG
@@ -457,27 +472,25 @@ enum {
 #define NR_BLOOM_FILTERS	2
 
 struct lru_gen_mm_state {
-	/* set to max_seq after each iteration */
-	unsigned long seq;
-	/* where the current iteration starts (inclusive) */
+	/* the current scan's seqno, incremented after each iteration */
+	unsigned long scan_seq;
+	/* where the current iteration continues after */
 	struct list_head *head;
-	/* where the last iteration ends (exclusive) */
+	/* where the last iteration ended before */
 	struct list_head *tail;
-	/* to wait for the last page table walker to finish */
-	struct wait_queue_head wait;
 	/* Bloom filters flip after each iteration */
 	unsigned long *filters[NR_BLOOM_FILTERS];
 	/* the mm stats for debugging */
 	unsigned long stats[NR_HIST_GENS][NR_MM_STATS];
-	/* the number of concurrent page table walkers */
-	int nr_walkers;
 };
 
 struct lru_gen_mm_walk {
 	/* the lruvec under reclaim */
 	struct lruvec *lruvec;
 	/* unstable max_seq from lru_gen_page */
-	unsigned long max_seq;
+	unsigned long max_seq[ANON_AND_FILE];
+	/* scan_seq of the scan this walk is part of */
+	unsigned long scan_seq;
 	/* the next address within an mm to scan */
 	unsigned long next_addr;
 	/* to batch page table entries */
@@ -1631,6 +1644,7 @@ static inline unsigned long section_nr_to_pfn(unsigned long sec)
 #define SUBSECTION_ALIGN_DOWN(pfn) ((pfn) & PAGE_SUBSECTION_MASK)
 
 struct mem_section_usage {
+	struct rcu_head rcu;
 #ifdef CONFIG_SPARSEMEM_VMEMMAP
 	DECLARE_BITMAP(subsection_map, SUBSECTIONS_PER_SECTION);
 #endif
@@ -1800,8 +1814,9 @@ static inline int subsection_map_index(unsigned long pfn)
 static inline int pfn_section_valid(struct mem_section *ms, unsigned long pfn)
 {
 	int idx = subsection_map_index(pfn);
+	struct mem_section_usage *usage = READ_ONCE(ms->usage);
 
-	return test_bit(idx, ms->usage->subsection_map);
+	return usage ? test_bit(idx, usage->subsection_map) : 0;
 }
 #else
 static inline int pfn_section_valid(struct mem_section *ms, unsigned long pfn)
@@ -1825,6 +1840,7 @@ static inline int pfn_section_valid(struct mem_section *ms, unsigned long pfn)
 static inline int pfn_valid(unsigned long pfn)
 {
 	struct mem_section *ms;
+	int ret;
 
 	/*
 	 * Ensure the upper PAGE_SHIFT bits are clear in the
@@ -1837,14 +1853,20 @@ static inline int pfn_valid(unsigned long pfn)
 
 	if (pfn_to_section_nr(pfn) >= NR_MEM_SECTIONS)
 		return 0;
-	ms = __nr_to_section(pfn_to_section_nr(pfn));
-	if (!valid_section(ms))
+	ms = __pfn_to_section(pfn);
+	rcu_read_lock();
+	if (!valid_section(ms)) {
+		rcu_read_unlock();
 		return 0;
+	}
 	/*
 	 * Traditionally early sections always returned pfn_valid() for
 	 * the entire section-sized span.
 	 */
-	return early_section(ms) || pfn_section_valid(ms, pfn);
+	ret = early_section(ms) || pfn_section_valid(ms, pfn);
+	rcu_read_unlock();
+
+	return ret;
 }
 #endif
 
@@ -1852,7 +1874,7 @@ static inline int pfn_in_present_section(unsigned long pfn)
 {
 	if (pfn_to_section_nr(pfn) >= NR_MEM_SECTIONS)
 		return 0;
-	return present_section(__nr_to_section(pfn_to_section_nr(pfn)));
+	return present_section(__pfn_to_section(pfn));
 }
 
 static inline unsigned long next_present_section_nr(unsigned long section_nr)

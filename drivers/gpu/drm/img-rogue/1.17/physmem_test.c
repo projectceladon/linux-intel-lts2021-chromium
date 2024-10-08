@@ -52,6 +52,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "physmem_osmem.h"
 #include "physmem_lma.h"
 #include "pvrsrv.h"
+#include "lists.h"
 
 #define PHYSMEM_TEST_PAGES        2     /* Mem test pages */
 #define PHYSMEM_TEST_PASSES_MAX   1000  /* Limit number of passes to some reasonable value */
@@ -146,6 +147,7 @@ PhysMemTestInit(PVRSRV_DEVICE_NODE **ppsDeviceNode, PVRSRV_DEVICE_CONFIG *psDevC
 {
 	PVRSRV_DEVICE_NODE *psDeviceNode;
 	PVRSRV_ERROR eError;
+	PVRSRV_DATA *psPVRSRVData = PVRSRVGetPVRSRVData();
 
 	/* Dummy device node */
 	psDeviceNode = OSAllocZMem(sizeof(*psDeviceNode));
@@ -155,9 +157,19 @@ PhysMemTestInit(PVRSRV_DEVICE_NODE **ppsDeviceNode, PVRSRV_DEVICE_CONFIG *psDevC
 	psDeviceNode->psDevConfig = psDevConfig;
 	psDeviceNode->eCurrentSysPowerState = PVRSRV_SYS_POWER_STATE_ON;
 
+	dllist_init(&psDeviceNode->sCleanupThreadWorkList);
+
 	/* Initialise Phys mem heaps */
 	eError = PVRSRVPhysMemHeapsInit(psDeviceNode, psDevConfig);
 	PVR_LOG_GOTO_IF_ERROR(eError, "PVRSRVPhysMemHeapsInit", ErrorSysDevDeInit);
+
+	/* Insert the device into the dev-list. This is needed for cleaning up
+	 * pages from the page pool. */
+	OSWRLockAcquireWrite(psPVRSRVData->hDeviceNodeListLock);
+	List_PVRSRV_DEVICE_NODE_InsertTail(&psPVRSRVData->psDeviceNodeList,
+									   psDeviceNode);
+	psPVRSRVData->ui32RegisteredDevices++;
+	OSWRLockReleaseWrite(psPVRSRVData->hDeviceNodeListLock);
 
 	*ppsDeviceNode = psDeviceNode;
 
@@ -173,6 +185,16 @@ ErrorSysDevDeInit:
 static void
 PhysMemTestDeInit(PVRSRV_DEVICE_NODE *psDeviceNode)
 {
+	PVRSRV_DATA *psPVRSRVData = PVRSRVGetPVRSRVData();
+
+	PVRSRVCleanupThreadWaitForDevice(psDeviceNode);
+
+	/* Remove device from the device list. */
+	OSWRLockAcquireWrite(psPVRSRVData->hDeviceNodeListLock);
+	List_PVRSRV_DEVICE_NODE_Remove(psDeviceNode);
+	psPVRSRVData->ui32RegisteredDevices--;
+	OSWRLockReleaseWrite(psPVRSRVData->hDeviceNodeListLock);
+
 	/* Deinitialise Phys mem heaps */
 	PVRSRVPhysMemHeapsDeinit(psDeviceNode);
 

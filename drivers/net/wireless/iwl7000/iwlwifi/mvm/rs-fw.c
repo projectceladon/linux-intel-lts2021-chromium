@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
  * Copyright (C) 2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2023 Intel Corporation
+ * Copyright (C) 2018-2024 Intel Corporation
  */
 #include "rs.h"
 #include "fw-api.h"
@@ -290,7 +290,7 @@ rs_fw_eht_set_enabled_rates(struct ieee80211_vif *vif,
 {
 	/* peer RX mcs capa */
 	const struct ieee80211_eht_mcs_nss_supp *eht_rx_mcs =
-		&cfg_eht_cap(link_sta)->eht_mcs_nss_supp;
+		NULL;
 	/* our TX mcs capa */
 	const struct ieee80211_eht_mcs_nss_supp *eht_tx_mcs =
 		&sband_eht_cap->eht_mcs_nss_supp;
@@ -357,7 +357,8 @@ rs_fw_eht_set_enabled_rates(struct ieee80211_vif *vif,
 	}
 
 	/* the station support only a single receive chain */
-	if (link_sta->smps_mode == IEEE80211_SMPS_STATIC || link_sta->rx_nss < 2)
+	if (link_sta->smps_mode == IEEE80211_SMPS_STATIC ||
+	    link_sta->rx_nss < 2)
 		memset(cmd->ht_rates[IWL_TLC_NSS_2], 0,
 		       sizeof(cmd->ht_rates[IWL_TLC_NSS_2]));
 }
@@ -385,7 +386,7 @@ static void rs_fw_set_supp_rates(struct ieee80211_vif *vif,
 	cmd->mode = IWL_TLC_MNG_MODE_NON_HT;
 
 	/* HT/VHT rates */
-	if (cfg_eht_cap_has_eht(link_sta) && sband_he_cap && sband_eht_cap) {
+	if (false/* no EHT */ && sband_he_cap && sband_eht_cap) {
 		cmd->mode = IWL_TLC_MNG_MODE_EHT;
 		rs_fw_eht_set_enabled_rates(vif, link_sta, sband_he_cap,
 					    sband_eht_cap, cmd);
@@ -478,8 +479,14 @@ void iwl_mvm_tlc_update_notif(struct iwl_mvm *mvm,
 	}
 
 	if (flags & IWL_TLC_NOTIF_FLAG_AMSDU && !mvm_link_sta->orig_amsdu_len) {
+		u32 enabled = le32_to_cpu(notif->amsdu_enabled);
 		u16 size = le32_to_cpu(notif->amsdu_size);
 		int i;
+
+		if (size < 2000) {
+			size = 0;
+			enabled = 0;
+		}
 
 		if (link_sta->agg.max_amsdu_len < size) {
 			/*
@@ -491,7 +498,7 @@ void iwl_mvm_tlc_update_notif(struct iwl_mvm *mvm,
 			goto out;
 		}
 
-		mvmsta->amsdu_enabled = le32_to_cpu(notif->amsdu_enabled);
+		mvmsta->amsdu_enabled = enabled;
 		mvmsta->max_amsdu_len = size;
 		link_sta->agg.max_rc_amsdu_len = mvmsta->max_amsdu_len;
 
@@ -562,10 +569,10 @@ u16 rs_fw_get_max_amsdu_len(struct ieee80211_sta *sta,
 		return 0;
 #endif
 
-	if (WARN_ON_ONCE(!link_conf->chandef.chan))
+	if (WARN_ON_ONCE(!link_conf->chanreq.oper.chan))
 		return IEEE80211_MAX_MPDU_LEN_VHT_3895;
 
-	if (nl80211_is_6ghz(link_conf->chandef.chan->band)) {
+	if (link_conf->chanreq.oper.chan->band == NL80211_BAND_6GHZ) {
 		switch (le16_get_bits(link_sta->he_6ghz_capa.capa,
 				      IEEE80211_HE_6GHZ_CAP_MAX_MPDU_LEN)) {
 		case IEEE80211_VHT_CAP_MAX_MPDU_LENGTH_11454:
@@ -575,7 +582,7 @@ u16 rs_fw_get_max_amsdu_len(struct ieee80211_sta *sta,
 		default:
 			return IEEE80211_MAX_MPDU_LEN_VHT_3895;
 		}
-	} else if (link_conf->chandef.chan->band == NL80211_BAND_2GHZ &&
+	} else if (link_conf->chanreq.oper.chan->band == NL80211_BAND_2GHZ &&
 		   eht_cap->has_eht) {
 		switch (u8_get_bits(eht_cap->eht_cap_elem.mac_cap_info[0],
 				    IEEE80211_EHT_MAC_CAP0_MAX_MPDU_LEN_MASK)) {
@@ -650,17 +657,7 @@ void iwl_mvm_rs_fw_rate_init(struct iwl_mvm *mvm,
 #ifdef CPTCFG_IWLWIFI_SUPPORT_DEBUG_OVERRIDES
 	if (!mvm->trans->dbg_cfg.eht_disable_extra_ltf)
 #endif
-	if (CSR_HW_REV_TYPE(mvm->trans->hw_rev) == IWL_CFG_MAC_TYPE_GL &&
-	    sband_eht_cap &&
-	    sband_eht_cap->eht_cap_elem.phy_cap_info[5] &
-		IEEE80211_EHT_PHY_CAP5_SUPP_EXTRA_EHT_LTF &&
-	    cfg_eht_cap_has_eht(link_sta) &&
-	    cfg_eht_cap(link_sta)->eht_cap_elem.phy_cap_info[5] &
-	    IEEE80211_EHT_PHY_CAP5_SUPP_EXTRA_EHT_LTF) {
-		IWL_DEBUG_RATE(mvm, "Set support for Extra EHT LTF\n");
-		cfg_cmd.flags |=
-			cpu_to_le16(IWL_TLC_MNG_CFG_FLAGS_EHT_EXTRA_LTF_MSK);
-	}
+	{}
 
 	rcu_read_lock();
 	mvm_link_sta = rcu_dereference(mvmsta->link[link_id]);
@@ -705,10 +702,7 @@ void iwl_mvm_rs_fw_rate_init(struct iwl_mvm *mvm,
 
 	cfg_cmd.max_tx_op = cpu_to_le16(mvmvif->max_tx_op);
 
-	cmd_ver = iwl_fw_lookup_cmd_ver(mvm->fw,
-					WIDE_ID(DATA_PATH_GROUP,
-						TLC_MNG_CONFIG_CMD),
-					0);
+	cmd_ver = iwl_fw_lookup_cmd_ver(mvm->fw, cmd_id, 0);
 	IWL_DEBUG_RATE(mvm, "TLC CONFIG CMD, sta_id=%d, max_ch_width=%d, mode=%d\n",
 		       cfg_cmd.sta_id, cfg_cmd.max_ch_width, cfg_cmd.mode);
 	IWL_DEBUG_RATE(mvm, "TLC CONFIG CMD, chains=0x%X, ch_wid_supp=%d, flags=0x%X\n",
@@ -744,9 +738,7 @@ void iwl_mvm_rs_fw_rate_init(struct iwl_mvm *mvm,
 		u16 cmd_size = sizeof(cfg_cmd_v3);
 
 		/* In old versions of the API the struct is 4 bytes smaller */
-		if (iwl_fw_lookup_cmd_ver(mvm->fw,
-					  WIDE_ID(DATA_PATH_GROUP,
-						  TLC_MNG_CONFIG_CMD), 0) < 3)
+		if (iwl_fw_lookup_cmd_ver(mvm->fw, cmd_id, 0) < 3)
 			cmd_size -= 4;
 
 		ret = iwl_mvm_send_cmd_pdu(mvm, cmd_id, CMD_ASYNC, cmd_size,
@@ -765,7 +757,16 @@ void iwl_mvm_rs_fw_rate_init(struct iwl_mvm *mvm,
 #endif
 }
 
-void iwl_mvm_rs_add_sta_link(struct iwl_mvm *mvm, struct iwl_mvm_link_sta *link_sta)
+int rs_fw_tx_protection(struct iwl_mvm *mvm, struct iwl_mvm_sta *mvmsta,
+			bool enable)
+{
+	/* TODO: need to introduce a new FW cmd since LQ cmd is not relevant */
+	IWL_DEBUG_RATE(mvm, "tx protection - not implemented yet.\n");
+	return 0;
+}
+
+void iwl_mvm_rs_add_sta_link(struct iwl_mvm *mvm,
+			     struct iwl_mvm_link_sta *link_sta)
 {
 	struct iwl_lq_sta_rs_fw *lq_sta;
 
@@ -799,12 +800,4 @@ void iwl_mvm_rs_add_sta(struct iwl_mvm *mvm, struct iwl_mvm_sta *mvmsta)
 
 		iwl_mvm_rs_add_sta_link(mvm, link);
 	}
-}
-
-int rs_fw_tx_protection(struct iwl_mvm *mvm, struct iwl_mvm_sta *mvmsta,
-			bool enable)
-{
-	/* TODO: need to introduce a new FW cmd since LQ cmd is not relevant */
-	IWL_DEBUG_RATE(mvm, "tx protection - not implemented yet.\n");
-	return 0;
 }

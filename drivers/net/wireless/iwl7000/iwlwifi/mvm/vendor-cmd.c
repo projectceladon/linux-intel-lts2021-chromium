@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2012-2014, 2018-2023 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2024 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -62,7 +62,6 @@ iwl_mvm_vendor_attr_policy[NUM_IWL_MVM_VENDOR_ATTR] = {
 	[IWL_MVM_VENDOR_ATTR_TXP_LIMIT_24] = { .type = NLA_U32 },
 	[IWL_MVM_VENDOR_ATTR_TXP_LIMIT_52L] = { .type = NLA_U32 },
 	[IWL_MVM_VENDOR_ATTR_TXP_LIMIT_52H] = { .type = NLA_U32 },
-	[IWL_MVM_VENDOR_ATTR_OPPPS_WA] = { .type = NLA_FLAG },
 	[IWL_MVM_VENDOR_ATTR_GSCAN_MAC_ADDR] = { .len = ETH_ALEN },
 	[IWL_MVM_VENDOR_ATTR_GSCAN_MAC_ADDR_MASK] = { .len = ETH_ALEN },
 	[IWL_MVM_VENDOR_ATTR_GSCAN_MAX_AP_PER_SCAN] = { .type = NLA_U32 },
@@ -90,6 +89,7 @@ iwl_mvm_vendor_attr_policy[NUM_IWL_MVM_VENDOR_ATTR] = {
 	[IWL_MVM_VENDOR_ATTR_RFIM_FREQ]		    = { .type = NLA_U32 },
 	[IWL_MVM_VENDOR_ATTR_RFIM_CHANNELS]	    = { .type = NLA_U32 },
 	[IWL_MVM_VENDOR_ATTR_RFIM_BANDS]	    = { .type = NLA_U32 },
+	[IWL_MVM_VENDOR_ATTR_RFIM_CNVI_MASTER]	    = { .type = NLA_U32 },
 	[IWL_MVM_VENDOR_ATTR_ROAMING_FORBIDDEN] = { .type = NLA_U8 },
 	[IWL_MVM_VENDOR_ATTR_AUTH_MODE] = { .type = NLA_U32 },
 	[IWL_MVM_VENDOR_ATTR_CHANNEL_NUM] = { .type = NLA_U8 },
@@ -225,183 +225,18 @@ free:
 	return retval;
 }
 
-#ifdef CPTCFG_IWLMVM_TDLS_PEER_CACHE
-static int iwl_vendor_tdls_peer_cache_add(struct wiphy *wiphy,
-					  struct wireless_dev *wdev,
-					  const void *data, int data_len)
-{
-	struct nlattr **tb;
-	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
-	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
-	struct iwl_mvm_tdls_peer_counter *cnt;
-	u8 *addr;
-	struct ieee80211_vif *vif = wdev_to_ieee80211_vif(wdev);
-	int err;
+enum iwl_rfi_capabilites {
+	IWL_MVM_RFI_DDR_CAPA_CNVI	= BIT(2),
+	IWL_MVM_RFI_DDR_CAPA_SCAN	= BIT(3),
+	IWL_MVM_RFI_DDR_CAPA_ASSOC	= BIT(4),
+	IWL_MVM_RFI_DDR_CAPA_TPT	= BIT(5),
+	IWL_MVM_RFI_DLVR_CAPA		= BIT(9),
+};
 
-	if (!vif)
-		return -ENODEV;
-
-	tb = iwl_mvm_parse_vendor_data(data, data_len);
-	if (IS_ERR(tb))
-		return PTR_ERR(tb);
-
-	if (vif->type != NL80211_IFTYPE_STATION ||
-	    !tb[IWL_MVM_VENDOR_ATTR_ADDR]) {
-		err = -EINVAL;
-		goto free;
-	}
-
-	mutex_lock(&mvm->mutex);
-	if (mvm->tdls_peer_cache_cnt >= IWL_MVM_TDLS_CNT_MAX_PEERS) {
-		err = -ENOSPC;
-		goto out_unlock;
-	}
-
-	addr = nla_data(tb[IWL_MVM_VENDOR_ATTR_ADDR]);
-
-	rcu_read_lock();
-	cnt = iwl_mvm_tdls_peer_cache_find(mvm, addr);
-	rcu_read_unlock();
-	if (cnt) {
-		err = -EEXIST;
-		goto out_unlock;
-	}
-
-	cnt = kzalloc(sizeof(*cnt) +
-		      sizeof(cnt->rx[0]) * mvm->trans->num_rx_queues,
-		      GFP_KERNEL);
-	if (!cnt) {
-		err = -ENOMEM;
-		goto out_unlock;
-	}
-
-	IWL_DEBUG_TDLS(mvm, "Adding %pM to TDLS peer cache\n", addr);
-	ether_addr_copy(cnt->mac.addr, addr);
-	cnt->vif = vif;
-	list_add_tail_rcu(&cnt->list, &mvm->tdls_peer_cache_list);
-	mvm->tdls_peer_cache_cnt++;
-
-	err = 0;
-
-out_unlock:
-	mutex_unlock(&mvm->mutex);
-free:
-	kfree(tb);
-	return err;
-}
-
-static int iwl_vendor_tdls_peer_cache_del(struct wiphy *wiphy,
-					  struct wireless_dev *wdev,
-					  const void *data, int data_len)
-{
-	struct nlattr **tb;
-	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
-	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
-	struct iwl_mvm_tdls_peer_counter *cnt;
-	u8 *addr;
-	int err;
-
-	tb = iwl_mvm_parse_vendor_data(data, data_len);
-	if (IS_ERR(tb))
-		return PTR_ERR(tb);
-
-	if (!tb[IWL_MVM_VENDOR_ATTR_ADDR]) {
-		err = -EINVAL;
-		goto free;
-	}
-
-	addr = nla_data(tb[IWL_MVM_VENDOR_ATTR_ADDR]);
-
-	mutex_lock(&mvm->mutex);
-	rcu_read_lock();
-	cnt = iwl_mvm_tdls_peer_cache_find(mvm, addr);
-	if (!cnt) {
-		IWL_DEBUG_TDLS(mvm, "%pM not found in TDLS peer cache\n", addr);
-		err = -ENOENT;
-		goto out_unlock;
-	}
-
-	IWL_DEBUG_TDLS(mvm, "Removing %pM from TDLS peer cache\n", addr);
-	mvm->tdls_peer_cache_cnt--;
-	list_del_rcu(&cnt->list);
-	kfree_rcu(cnt, rcu_head);
-	err = 0;
-
-out_unlock:
-	rcu_read_unlock();
-	mutex_unlock(&mvm->mutex);
-free:
-	kfree(tb);
-	return err;
-}
-
-static int iwl_vendor_tdls_peer_cache_query(struct wiphy *wiphy,
-					    struct wireless_dev *wdev,
-					    const void *data, int data_len)
-{
-	struct nlattr **tb;
-	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
-	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
-	struct iwl_mvm_tdls_peer_counter *cnt;
-	struct sk_buff *skb;
-	u32 rx_bytes, tx_bytes;
-	u8 *addr;
-	int err;
-
-	tb = iwl_mvm_parse_vendor_data(data, data_len);
-	if (IS_ERR(tb))
-		return PTR_ERR(tb);
-
-	if (!tb[IWL_MVM_VENDOR_ATTR_ADDR]) {
-		kfree(tb);
-		return -EINVAL;
-	}
-
-	addr = nla_data(tb[IWL_MVM_VENDOR_ATTR_ADDR]);
-
-	/* we can free the tb, the addr pointer is still valid into the msg */
-	kfree(tb);
-
-	rcu_read_lock();
-	cnt = iwl_mvm_tdls_peer_cache_find(mvm, addr);
-	if (!cnt) {
-		IWL_DEBUG_TDLS(mvm, "%pM not found in TDLS peer cache\n",
-			       addr);
-		err = -ENOENT;
-	} else {
-		int q;
-
-		tx_bytes = cnt->tx_bytes;
-		rx_bytes = 0;
-		for (q = 0; q < mvm->trans->num_rx_queues; q++)
-			rx_bytes += cnt->rx[q].bytes;
-		err = 0;
-	}
-	rcu_read_unlock();
-	if (err)
-		return err;
-
-	skb = cfg80211_vendor_cmd_alloc_reply_skb(wiphy, 100);
-	if (!skb)
-		return -ENOMEM;
-	if (nla_put_u32(skb, IWL_MVM_VENDOR_ATTR_TX_BYTES, tx_bytes) ||
-	    nla_put_u32(skb, IWL_MVM_VENDOR_ATTR_RX_BYTES, rx_bytes)) {
-		kfree_skb(skb);
-		return -ENOBUFS;
-	}
-
-	return cfg80211_vendor_cmd_reply(skb);
-}
-#endif /* CPTCFG_IWLMVM_TDLS_PEER_CACHE */
-
-#define IWL_MVM_RFIM_CAPA_CNVI  (BIT(2))
-#define IWL_MVM_RFIM_CAPA_SCAN  (BIT(3))
-#define IWL_MVM_RFIM_CAPA_ASSOC (BIT(4))
-#define IWL_MVM_RFIM_CAPA_TPT   (BIT(5))
-#define IWL_MVM_RFIM_CAPA_ALL	(IWL_MVM_RFIM_CAPA_CNVI	  |\
-				IWL_MVM_RFIM_CAPA_SCAN    |\
-				IWL_MVM_RFIM_CAPA_ASSOC   |\
-				IWL_MVM_RFIM_CAPA_TPT)
+#define IWL_MVM_RFI_DDR_CAPA_ALL (IWL_MVM_RFI_DDR_CAPA_CNVI	|\
+				  IWL_MVM_RFI_DDR_CAPA_SCAN	|\
+				  IWL_MVM_RFI_DDR_CAPA_ASSOC	|\
+				  IWL_MVM_RFI_DDR_CAPA_TPT)
 
 static int iwl_vendor_rfim_get_capa(struct wiphy *wiphy,
 				    struct wireless_dev *wdev,
@@ -410,21 +245,24 @@ static int iwl_vendor_rfim_get_capa(struct wiphy *wiphy,
 	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
 	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
 	struct sk_buff *skb;
-	u8 capa = 0;
+	u16 capa = 0;
 
 	skb = cfg80211_vendor_cmd_alloc_reply_skb(wiphy, 4);
 	if (!skb)
 		return -ENOMEM;
 
-	if (mvm->trans->trans_cfg->device_family >= IWL_DEVICE_FAMILY_AX210 &&
-	    mvm->trans->trans_cfg->integrated) {
-		if (iwl_rfi_supported(mvm))
-			capa = IWL_MVM_RFIM_CAPA_ALL;
+	if (mvm->trans->trans_cfg->integrated) {
+		if (iwl_rfi_supported(mvm, mvm->force_enable_rfi, true))
+			capa = IWL_MVM_RFI_DDR_CAPA_ALL;
 		else
-			capa = IWL_MVM_RFIM_CAPA_CNVI;
+			capa = IWL_MVM_RFI_DDR_CAPA_CNVI;
 	}
 
-	if (nla_put_u8(skb, IWL_MVM_VENDOR_ATTR_RFIM_CAPA, capa)) {
+	if (iwl_rfi_supported(mvm, mvm->force_enable_rfi, false))
+		capa |= IWL_MVM_RFI_DLVR_CAPA;
+
+	IWL_DEBUG_FW(mvm, "RFIm capabilities:%04x\n", capa);
+	if (nla_put_u16(skb, IWL_MVM_VENDOR_ATTR_RFIM_CAPA, capa)) {
 		kfree_skb(skb);
 		return -ENOBUFS;
 	}
@@ -432,13 +270,13 @@ static int iwl_vendor_rfim_get_capa(struct wiphy *wiphy,
 	return cfg80211_vendor_cmd_reply(skb);
 }
 
-static int iwl_vendor_rfim_get_table(struct wiphy *wiphy,
-				     struct wireless_dev *wdev,
-				     const void *data, int data_len)
+static int iwl_vendor_rfi_ddr_get_table(struct wiphy *wiphy,
+					struct wireless_dev *wdev,
+					const void *data, int data_len)
 {
 	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
 	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
-	struct iwl_rfi_freq_table_resp_cmd *resp;
+	struct iwl_rfi_freq_table_resp_cmd_v1 *resp;
 	struct sk_buff *skb = NULL;
 	struct nlattr *rfim_info;
 	int i, ret;
@@ -466,15 +304,15 @@ static int iwl_vendor_rfim_get_table(struct wiphy *wiphy,
 		goto err;
 	}
 
-	for (i = 0; i < 4; i++) {
+	for (i = 0; i < ARRAY_SIZE(resp->ddr_table); i++) {
 		if (nla_put_u16(skb, IWL_MVM_VENDOR_ATTR_RFIM_FREQ,
-				le16_to_cpu(resp->table[i].freq)) ||
+				le16_to_cpu(resp->ddr_table[i].freq)) ||
 		    nla_put(skb, IWL_MVM_VENDOR_ATTR_RFIM_CHANNELS,
-			    sizeof(resp->table[i].channels),
-			    resp->table[i].channels) ||
+			    sizeof(resp->ddr_table[i].channels),
+			    resp->ddr_table[i].channels) ||
 		    nla_put(skb, IWL_MVM_VENDOR_ATTR_RFIM_BANDS,
-			    sizeof(resp->table[i].bands),
-			    resp->table[i].bands)) {
+			    sizeof(resp->ddr_table[i].bands),
+			    resp->ddr_table[i].bands)) {
 			ret = -ENOBUFS;
 			goto err;
 		}
@@ -491,13 +329,13 @@ err:
 	return ret;
 }
 
-static int iwl_vendor_rfim_set_table(struct wiphy *wiphy,
-				     struct wireless_dev *wdev,
-				     const void *data, int data_len)
+static int iwl_vendor_rfi_ddr_set_table(struct wiphy *wiphy,
+					struct wireless_dev *wdev,
+					const void *data, int data_len)
 {
 	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
 	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
-	struct iwl_rfi_lut_entry rfim_table[IWL_RFI_LUT_SIZE] = {};
+	struct iwl_rfi_ddr_lut_entry *rfi_ddr_table = NULL;
 	struct nlattr **tb;
 	struct nlattr *attr;
 	int rem, err = 0;
@@ -512,11 +350,18 @@ static int iwl_vendor_rfim_set_table(struct wiphy *wiphy,
 		goto out;
 	}
 
+	rfi_ddr_table = kzalloc(sizeof(*rfi_ddr_table) * IWL_RFI_DDR_LUT_SIZE,
+				GFP_KERNEL);
+	if (!rfi_ddr_table) {
+		err = -ENOMEM;
+		goto out;
+	}
+
 	nla_for_each_nested(attr, tb[IWL_MVM_VENDOR_ATTR_RFIM_INFO], rem) {
 		switch (nla_type(attr)) {
 		case IWL_MVM_VENDOR_ATTR_RFIM_FREQ:
 			row_idx++;
-			rfim_table[row_idx].freq =
+			rfi_ddr_table[row_idx].freq =
 				cpu_to_le16(nla_get_u16(attr));
 			break;
 		case IWL_MVM_VENDOR_ATTR_RFIM_CHANNELS:
@@ -524,16 +369,16 @@ static int iwl_vendor_rfim_set_table(struct wiphy *wiphy,
 				err = -EINVAL;
 				goto out;
 			}
-			memcpy(rfim_table[row_idx].channels, nla_data(attr),
-			       ARRAY_SIZE(rfim_table[row_idx].channels));
+			memcpy(rfi_ddr_table[row_idx].channels, nla_data(attr),
+			       ARRAY_SIZE(rfi_ddr_table[row_idx].channels));
 			break;
 		case IWL_MVM_VENDOR_ATTR_RFIM_BANDS:
 			if (row_idx < 0) {
 				err = -EINVAL;
 				goto out;
 			}
-			memcpy(rfim_table[row_idx].bands, nla_data(attr),
-			       ARRAY_SIZE(rfim_table[row_idx].bands));
+			memcpy(rfi_ddr_table[row_idx].bands, nla_data(attr),
+			       ARRAY_SIZE(rfi_ddr_table[row_idx].bands));
 			break;
 		default:
 			IWL_ERR(mvm, "Invalid attribute %d\n", nla_type(attr));
@@ -542,11 +387,88 @@ static int iwl_vendor_rfim_set_table(struct wiphy *wiphy,
 		}
 	}
 
-	err = iwl_rfi_send_config_cmd(mvm, rfim_table);
+	mutex_lock(&mvm->mutex);
+	err = iwl_rfi_send_config_cmd(mvm, rfi_ddr_table, false, false);
+	mutex_unlock(&mvm->mutex);
 	if (err)
 		IWL_ERR(mvm, "Failed to send rfi table to FW, error %d\n", err);
 
 out:
+	kfree(rfi_ddr_table);
+	kfree(tb);
+	return err;
+}
+
+enum iwl_rfi_cnvi_master_conf {
+	IWL_MVM_RFI_CNVI_DLVR_NOT_MASTER	= BIT(0),
+	IWL_MVM_RFI_CNVI_DDR_NOT_MASTER		= BIT(1),
+};
+
+#define IWL_MVM_RFI_CNVI_NOT_MASTER	(IWL_MVM_RFI_CNVI_DLVR_NOT_MASTER |\
+					 IWL_MVM_RFI_CNVI_DDR_NOT_MASTER)
+
+static int iwl_vendor_rfi_set_cnvi_master(struct wiphy *wiphy,
+					  struct wireless_dev *wdev,
+					  const void *data, int data_len)
+{
+	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
+	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
+	bool old_rfi_wlan_master = mvm->rfi_wlan_master;
+	struct nlattr **tb;
+	int err = 0;
+	u32 rfi_master_conf;
+
+	tb = iwl_mvm_parse_vendor_data(data, data_len);
+	if (IS_ERR(tb))
+		return PTR_ERR(tb);
+
+	if (!tb[IWL_MVM_VENDOR_ATTR_RFIM_CNVI_MASTER]) {
+		err = -EINVAL;
+		goto free;
+	}
+
+	rfi_master_conf = nla_get_u32(tb[IWL_MVM_VENDOR_ATTR_RFIM_CNVI_MASTER]);
+	IWL_DEBUG_FW(mvm, "rfi cnvi master conf is 0x%08x\n", rfi_master_conf);
+	rfi_master_conf &= IWL_MVM_RFI_CNVI_NOT_MASTER;
+
+	mutex_lock(&mvm->mutex);
+
+	/* rfi_master_conf can be 0 or 3 only.
+	 * i.e 0 means CNVI is master. 3 means user-space application is master.
+	 * 1 and 2 are invalid configurations, which means there is no way for
+	 * the user space to take partial control.
+	 */
+	if (!rfi_master_conf) {
+		mvm->rfi_wlan_master = true;
+	} else if (rfi_master_conf == IWL_MVM_RFI_CNVI_NOT_MASTER) {
+		mvm->rfi_wlan_master = false;
+	} else {
+		mutex_unlock(&mvm->mutex);
+		err = -EINVAL;
+		goto free;
+	}
+
+	/* if app sends two consecutive enable/disable then
+	 * driver will not send the same table to the firmware
+	 */
+	if (old_rfi_wlan_master != mvm->rfi_wlan_master ||
+	    mvm->force_enable_rfi != mvm->rfi_wlan_master) {
+		/* By-pass sending of RFI_CONFIG command, if user space
+		 * takes control when "fw_rfi_state" is not PMC_SUPPORTED.
+		 */
+		if (mvm->rfi_wlan_master || iwl_mvm_fw_rfi_state_supported(mvm))
+			err = iwl_rfi_send_config_cmd(mvm, NULL, true, false);
+	} else {
+		IWL_ERR(mvm,
+			"Wlan RFI master configuration is same as old:%d\n",
+			old_rfi_wlan_master);
+	}
+
+	if (err)
+		mvm->rfi_wlan_master = old_rfi_wlan_master;
+
+	mutex_unlock(&mvm->mutex);
+free:
 	kfree(tb);
 	return err;
 }
@@ -557,17 +479,21 @@ static int iwl_vendor_set_nic_txpower_limit(struct wiphy *wiphy,
 {
 	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
 	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
-	struct iwl_dev_tx_power_cmd cmd = {
+	struct iwl_dev_tx_power_cmd_v3_v8 cmd = {
 		.common.set_mode = cpu_to_le32(IWL_TX_POWER_MODE_SET_DEVICE),
-		.common.dev_24 = cpu_to_le16(IWL_DEV_MAX_TX_POWER),
-		.common.dev_52_low = cpu_to_le16(IWL_DEV_MAX_TX_POWER),
-		.common.dev_52_high = cpu_to_le16(IWL_DEV_MAX_TX_POWER),
+		.per_band.dev_24 = cpu_to_le16(IWL_DEV_MAX_TX_POWER),
+		.per_band.dev_52_low = cpu_to_le16(IWL_DEV_MAX_TX_POWER),
+		.per_band.dev_52_high = cpu_to_le16(IWL_DEV_MAX_TX_POWER),
 	};
 	struct nlattr **tb;
 	int len;
 	int err;
 	u8 cmd_ver = iwl_fw_lookup_cmd_ver(mvm->fw, REDUCE_TX_POWER_CMD,
 					   IWL_FW_CMD_VER_UNKNOWN);
+
+	/* ver9 and above of the command does not support setting per band limits */
+	if (cmd_ver > 8)
+		return -EOPNOTSUPP;
 
 	tb = iwl_mvm_parse_vendor_data(data, data_len);
 	if (IS_ERR(tb))
@@ -580,7 +506,7 @@ static int iwl_vendor_set_nic_txpower_limit(struct wiphy *wiphy,
 			err = -EINVAL;
 			goto free;
 		}
-		cmd.common.dev_24 = cpu_to_le16(txp);
+		cmd.per_band.dev_24 = cpu_to_le16(txp);
 	}
 
 	if (tb[IWL_MVM_VENDOR_ATTR_TXP_LIMIT_52L]) {
@@ -590,7 +516,7 @@ static int iwl_vendor_set_nic_txpower_limit(struct wiphy *wiphy,
 			err = -EINVAL;
 			goto free;
 		}
-		cmd.common.dev_52_low = cpu_to_le16(txp);
+		cmd.per_band.dev_52_low = cpu_to_le16(txp);
 	}
 
 	if (tb[IWL_MVM_VENDOR_ATTR_TXP_LIMIT_52H]) {
@@ -600,10 +526,12 @@ static int iwl_vendor_set_nic_txpower_limit(struct wiphy *wiphy,
 			err = -EINVAL;
 			goto free;
 		}
-		cmd.common.dev_52_high = cpu_to_le16(txp);
+		cmd.per_band.dev_52_high = cpu_to_le16(txp);
 	}
 
-	if (cmd_ver == 6)
+	if (cmd_ver == 8)
+		len = sizeof(mvm->txp_cmd.v8);
+	else if (cmd_ver == 6)
 		len = sizeof(mvm->txp_cmd.v6);
 	else if (fw_has_api(&mvm->fw->ucode_capa,
 			    IWL_UCODE_TLV_API_REDUCE_TX_POWER))
@@ -614,8 +542,11 @@ static int iwl_vendor_set_nic_txpower_limit(struct wiphy *wiphy,
 	else
 		len = sizeof(mvm->txp_cmd.v3);
 
-	/* all structs have the same common part, add it */
+	/* all structs have the same common part, add its length */
 	len += sizeof(cmd.common);
+
+	/* all structs have the same per_band part, add its length */
+	len += sizeof(cmd.per_band);
 
 	mutex_lock(&mvm->mutex);
 	if (iwl_mvm_firmware_running(mvm))
@@ -634,60 +565,6 @@ free:
 	kfree(tb);
 	return err;
 }
-
-#ifdef CPTCFG_IWLMVM_P2P_OPPPS_TEST_WA
-static int iwl_mvm_oppps_wa_update_quota(struct iwl_mvm *mvm,
-					 struct ieee80211_vif *vif,
-					 bool enable)
-{
-	struct iwl_mvm_vif *mvmvif = iwl_mvm_vif_from_mac80211(vif);
-	struct ieee80211_p2p_noa_attr *noa = &vif->bss_conf.p2p_noa_attr;
-	bool force_update = true;
-
-	if (enable && noa->oppps_ctwindow & IEEE80211_P2P_OPPPS_ENABLE_BIT)
-		mvm->p2p_opps_test_wa_vif = mvmvif;
-	else
-		mvm->p2p_opps_test_wa_vif = NULL;
-
-	if (fw_has_capa(&mvm->fw->ucode_capa,
-			IWL_UCODE_TLV_CAPA_DYNAMIC_QUOTA)) {
-		return -EOPNOTSUPP;
-	}
-
-	return iwl_mvm_update_quotas(mvm, force_update, NULL);
-}
-
-static int iwl_mvm_oppps_wa(struct wiphy *wiphy,
-			    struct wireless_dev *wdev,
-			    const void *data, int data_len)
-{
-	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
-	struct iwl_mvm *mvm = IWL_MAC80211_GET_MVM(hw);
-	struct nlattr **tb;
-	int err;
-	struct ieee80211_vif *vif = wdev_to_ieee80211_vif(wdev);
-
-	if (!vif)
-		return -ENODEV;
-
-	tb = iwl_mvm_parse_vendor_data(data, data_len);
-	if (IS_ERR(tb))
-		return PTR_ERR(tb);
-
-	mutex_lock(&mvm->mutex);
-	if (vif->type == NL80211_IFTYPE_STATION && vif->p2p) {
-		bool enable = !!tb[IWL_MVM_VENDOR_ATTR_OPPPS_WA];
-
-		err = iwl_mvm_oppps_wa_update_quota(mvm, vif, enable);
-	} else {
-		err = -EOPNOTSUPP;
-	}
-	mutex_unlock(&mvm->mutex);
-
-	kfree(tb);
-	return err;
-}
-#endif
 
 void iwl_mvm_active_rx_filters(struct iwl_mvm *mvm)
 {
@@ -917,7 +794,6 @@ free:
 	return err;
 }
 
-#ifdef CONFIG_ACPI
 static int iwl_mvm_vendor_set_dynamic_txp_profile(struct wiphy *wiphy,
 						  struct wireless_dev *wdev,
 						  const void *data,
@@ -987,7 +863,7 @@ static int iwl_mvm_vendor_get_sar_profile_info(struct wiphy *wiphy,
 	int i;
 	u32 n_profiles = 0;
 
-	for (i = 0; i < ACPI_SAR_PROFILE_NUM; i++) {
+	for (i = 0; i < BIOS_SAR_MAX_PROFILE_NUM; i++) {
 		if (mvm->fwrt.sar_profiles[i].enabled)
 			n_profiles++;
 	}
@@ -1012,7 +888,7 @@ static int iwl_mvm_vendor_put_geo_profile(struct iwl_mvm *mvm, struct sk_buff *s
 {
 	int i;
 
-	for (i = 0; i < ACPI_GEO_NUM_BANDS_REV2; i++) {
+	for (i = 0; i < BIOS_GEO_MAX_NUM_BANDS; i++) {
 		struct nlattr *nl_band = nla_nest_start(skb, i + 1);
 
 		if (!nl_band)
@@ -1146,7 +1022,7 @@ static int iwl_mvm_vendor_sar_get_table(struct wiphy *wiphy,
 		return -ENOBUFS;
 	}
 
-	for (prof = 0; prof < ACPI_SAR_PROFILE_NUM; prof++) {
+	for (prof = 0; prof < BIOS_SAR_MAX_PROFILE_NUM; prof++) {
 		struct nlattr *nl_profile;
 
 		if (!mvm->fwrt.sar_profiles[prof].enabled)
@@ -1159,8 +1035,8 @@ static int iwl_mvm_vendor_sar_get_table(struct wiphy *wiphy,
 		}
 
 		/* put info per chain */
-		for (chain = 0; chain < ACPI_SAR_NUM_CHAINS_REV2; chain++) {
-			if (nla_put(skb, chain + 1, ACPI_SAR_NUM_SUB_BANDS_REV2,
+		for (chain = 0; chain < BIOS_SAR_MAX_CHAINS_PER_PROFILE; chain++) {
+			if (nla_put(skb, chain + 1, BIOS_SAR_MAX_SUB_BANDS_NUM,
 				    mvm->fwrt.sar_profiles[prof].chains[chain].subbands)) {
 				ret = -ENOBUFS;
 				goto err;
@@ -1209,7 +1085,7 @@ static int iwl_mvm_vendor_geo_sar_get_table(struct wiphy *wiphy,
 	}
 
 	/* get each profile */
-	for (i = 0; i < ACPI_NUM_GEO_PROFILES; i++) {
+	for (i = 0; i < BIOS_GEO_MAX_PROFILE_NUM; i++) {
 		struct nlattr *nl_profile = nla_nest_start(skb, i + 1);
 
 		if (!nl_profile) {
@@ -1269,8 +1145,6 @@ err:
 	kfree_skb(skb);
 	return ret;
 }
-
-#endif
 
 static const struct nla_policy
 iwl_mvm_vendor_fips_hw_policy[NUM_IWL_VENDOR_FIPS_TEST_VECTOR_HW] = {
@@ -1334,6 +1208,8 @@ static int iwl_mvm_vendor_validate_aes_vector(struct nlattr **tb)
  *
  * This function returns the length of the command buffer (in bytes) in case of
  * success, or a negative error code on failure.
+ *
+ * Returns: an error code
  */
 static int iwl_mvm_vendor_build_vector(u8 **cmd_buf, struct nlattr *vector,
 				       u8 flags)
@@ -1682,12 +1558,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		.flags = WIPHY_VENDOR_CMD_NEED_NETDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
 		.doit = iwl_mvm_set_low_latency,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1697,12 +1569,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		.flags = WIPHY_VENDOR_CMD_NEED_NETDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
 		.doit = iwl_mvm_get_low_latency,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1712,60 +1580,9 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		.flags = WIPHY_VENDOR_CMD_NEED_NETDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
 		.doit = iwl_mvm_set_country,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
-#ifdef CPTCFG_IWLMVM_TDLS_PEER_CACHE
-	{
-		.info = {
-			.vendor_id = INTEL_OUI,
-			.subcmd = IWL_MVM_VENDOR_CMD_TDLS_PEER_CACHE_ADD,
-		},
-		.flags = WIPHY_VENDOR_CMD_NEED_NETDEV |
-			 WIPHY_VENDOR_CMD_NEED_RUNNING,
-		.doit = iwl_vendor_tdls_peer_cache_add,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
-		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
-		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
-	},
-	{
-		.info = {
-			.vendor_id = INTEL_OUI,
-			.subcmd = IWL_MVM_VENDOR_CMD_TDLS_PEER_CACHE_DEL,
-		},
-		.flags = WIPHY_VENDOR_CMD_NEED_NETDEV |
-			 WIPHY_VENDOR_CMD_NEED_RUNNING,
-		.doit = iwl_vendor_tdls_peer_cache_del,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
-		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
-		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
-	},
-	{
-		.info = {
-			.vendor_id = INTEL_OUI,
-			.subcmd = IWL_MVM_VENDOR_CMD_TDLS_PEER_CACHE_QUERY,
-		},
-		.flags = WIPHY_VENDOR_CMD_NEED_NETDEV |
-			 WIPHY_VENDOR_CMD_NEED_RUNNING,
-		.doit = iwl_vendor_tdls_peer_cache_query,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
-		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
-		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
-	},
-#endif /* CPTCFG_IWLMVM_TDLS_PEER_CACHE */
 	{
 		.info = {
 			.vendor_id = INTEL_OUI,
@@ -1773,30 +1590,9 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
 		.doit = iwl_vendor_set_nic_txpower_limit,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
-#ifdef CPTCFG_IWLMVM_P2P_OPPPS_TEST_WA
-	{
-		.info = {
-			.vendor_id = INTEL_OUI,
-			.subcmd = IWL_MVM_VENDOR_CMD_OPPPS_WA,
-		},
-		.flags = WIPHY_VENDOR_CMD_NEED_NETDEV |
-			 WIPHY_VENDOR_CMD_NEED_RUNNING,
-		.doit = iwl_mvm_oppps_wa,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
-		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
-		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
-	},
-#endif
 	{
 		.info = {
 			.vendor_id = INTEL_OUI,
@@ -1805,12 +1601,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		.flags = WIPHY_VENDOR_CMD_NEED_NETDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
 		.doit = iwl_mvm_vendor_rxfilter,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1820,12 +1612,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
 		.doit = iwl_mvm_vendor_dbg_collect,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1836,14 +1624,9 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
 		.doit = iwl_mvm_vendor_nan_faw_conf,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
-#ifdef CONFIG_ACPI
 	{
 		.info = {
 			.vendor_id = INTEL_OUI,
@@ -1851,12 +1634,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
 		.doit = iwl_mvm_vendor_set_dynamic_txp_profile,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1865,12 +1644,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
 		.doit = iwl_mvm_vendor_get_sar_profile_info,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1880,12 +1655,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
 		.doit = iwl_mvm_vendor_get_geo_profile_info,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1894,12 +1665,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
 		.doit = iwl_mvm_vendor_ppag_get_table,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1908,12 +1675,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
 		.doit = iwl_mvm_vendor_sar_get_table,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1922,12 +1685,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
 		.doit = iwl_mvm_vendor_geo_sar_get_table,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1936,14 +1695,9 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
 		.doit = iwl_mvm_vendor_sgom_get_table,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
-#endif
 	{
 		.info = {
 			.vendor_id = INTEL_OUI,
@@ -1952,12 +1706,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
 		.doit = iwl_mvm_vendor_test_fips,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_fips_hw_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_VENDOR_FIPS_TEST_VECTOR_HW,
-#endif
 	},
 	{
 		.info = {
@@ -1965,12 +1715,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 			.subcmd = IWL_MVM_VENDOR_CMD_CSI_EVENT,
 		},
 		.doit = iwl_mvm_vendor_csi_register,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1980,12 +1726,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
 		.doit = iwl_mvm_vendor_add_pasn_sta,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -1995,12 +1737,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
 		.doit = iwl_mvm_vendor_remove_pasn_sta,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -2009,13 +1747,9 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
 			 WIPHY_VENDOR_CMD_NEED_RUNNING,
-		.doit = iwl_vendor_rfim_set_table,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
+		.doit = iwl_vendor_rfi_ddr_set_table,
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -2023,13 +1757,9 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 			.subcmd = IWL_MVM_VENDOR_CMD_RFIM_GET_TABLE,
 		},
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
-		.doit = iwl_vendor_rfim_get_table,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
+		.doit = iwl_vendor_rfi_ddr_get_table,
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -2038,12 +1768,19 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
 		.doit = iwl_vendor_rfim_get_capa,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
+	},
+	{
+		.info = {
+			.vendor_id = INTEL_OUI,
+			.subcmd = IWL_MVM_VENDOR_CMD_RFIM_SET_CNVI_MASTER,
+		},
+		.flags = WIPHY_VENDOR_CMD_NEED_WDEV |
+			 WIPHY_VENDOR_CMD_NEED_RUNNING,
+		.doit = iwl_vendor_rfi_set_cnvi_master,
+		.policy = iwl_mvm_vendor_attr_policy,
+		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
 	},
 	{
 		.info = {
@@ -2052,12 +1789,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.doit = iwl_mvm_vendor_get_csme_conn_info,
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 	{
 		.info = {
@@ -2066,12 +1799,8 @@ static const struct wiphy_vendor_command iwl_mvm_vendor_commands[] = {
 		},
 		.doit = iwl_mvm_vendor_host_get_ownership,
 		.flags = WIPHY_VENDOR_CMD_NEED_WDEV,
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.policy = iwl_mvm_vendor_attr_policy,
-#endif
-#if CFG80211_VERSION >= KERNEL_VERSION(5,3,0)
 		.maxattr = MAX_IWL_MVM_VENDOR_ATTR,
-#endif
 	},
 };
 

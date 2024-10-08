@@ -91,6 +91,7 @@ struct erofs_sb_lz4_info {
 
 struct erofs_sb_info {
 	struct erofs_mount_opts opt;	/* options */
+
 #ifdef CONFIG_EROFS_FS_ZIP
 	/* list for all registered superblocks, mainly for shrinker */
 	struct list_head list;

@@ -412,6 +412,11 @@ PVRSRV_ERROR PVRSRVDevicePostPowerStateKM(PVRSRV_POWER_DEV			*psPowerDevice,
 	IMG_UINT64 ui64DevTimer2 = 0;
 	PVRSRV_ERROR eError;
 
+#if defined(SUPPORT_PMR_DEFERRED_FREE)
+	PVRSRV_DEVICE_NODE *psDeviceNode;
+	PVRSRV_DEV_POWER_STATE eOldPowerState;
+#endif
+
 	PVR_ASSERT(eNewPowerState != PVRSRV_DEV_POWER_STATE_DEFAULT);
 
 	eCurrentPowerState = OSAtomicRead(&psPowerDevice->eCurrentPowerState);
@@ -456,7 +461,26 @@ PVRSRV_ERROR PVRSRVDevicePostPowerStateKM(PVRSRV_POWER_DEV			*psPowerDevice,
 							 eNewPowerState == PVRSRV_DEV_POWER_STATE_ON,
 							 IMG_FALSE);
 
+#if !defined(SUPPORT_PMR_DEFERRED_FREE)
 	OSAtomicWrite(&psPowerDevice->eCurrentPowerState, eNewPowerState);
+#else
+	eOldPowerState = OSAtomicExchange(&psPowerDevice->eCurrentPowerState,
+	                                  eNewPowerState);
+
+	psDeviceNode = psPowerDevice->hDevCookie;
+	PVR_ASSERT(psDeviceNode);
+
+	if (eNewPowerState == PVRSRV_DEV_POWER_STATE_OFF &&
+	    eNewPowerState != eOldPowerState)
+	{
+		psDeviceNode->uiPowerOffCounter = psDeviceNode->uiPowerOffCounterNext;
+
+		/* It's not really important to know if any zombies were queued. */
+		(void) PMRQueueZombiesForCleanup(psDeviceNode);
+
+		psDeviceNode->uiPowerOffCounterNext++;
+	}
+#endif
 
 	return PVRSRV_OK;
 }

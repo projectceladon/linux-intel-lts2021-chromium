@@ -233,6 +233,7 @@ static int kvm_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_SET_GUEST_DEBUG:
 	case KVM_CAP_VCPU_ATTRIBUTES:
 	case KVM_CAP_PTP_KVM:
+	case KVM_CAP_COUNTER_OFFSET:
 	case KVM_CAP_GET_CUR_CPUFREQ:
 	case KVM_CAP_UTIL_HINT:
 	case KVM_CAP_GET_CPUFREQ_TBL:
@@ -460,7 +461,7 @@ void kvm_arch_vcpu_destroy(struct kvm_vcpu *vcpu)
 		kvm_mmu_free_memory_cache(&vcpu->arch.mmu_page_cache);
 	kvm_timer_vcpu_terminate(vcpu);
 	kvm_pmu_vcpu_destroy(vcpu);
-
+	kvm_vgic_vcpu_destroy(vcpu);
 	kvm_arm_vcpu_destroy(vcpu);
 }
 
@@ -482,6 +483,7 @@ void kvm_arch_vcpu_blocking(struct kvm_vcpu *vcpu)
 	 * doorbells to be signalled, should an interrupt become pending.
 	 */
 	preempt_disable();
+	vcpu->arch.flags |= KVM_ARM64_VCPU_IN_WFI;
 	kvm_vgic_put(vcpu, true);
 	preempt_enable();
 }
@@ -489,6 +491,7 @@ void kvm_arch_vcpu_blocking(struct kvm_vcpu *vcpu)
 void kvm_arch_vcpu_unblocking(struct kvm_vcpu *vcpu)
 {
 	preempt_disable();
+	vcpu->arch.flags &= ~KVM_ARM64_VCPU_IN_WFI;
 	kvm_vgic_load(vcpu);
 	preempt_enable();
 }
@@ -842,7 +845,7 @@ static void check_vcpu_requests(struct kvm_vcpu *vcpu)
 		if (kvm_check_request(KVM_REQ_RELOAD_GICv4, vcpu)) {
 			/* The distributor enable bits were changed */
 			preempt_disable();
-			vgic_v4_put(vcpu, false);
+			vgic_v4_put(vcpu);
 			vgic_v4_load(vcpu);
 			preempt_enable();
 		}
@@ -1209,7 +1212,8 @@ static int kvm_vcpu_set_target(struct kvm_vcpu *vcpu,
 	unsigned int i, ret;
 	u32 phys_target = kvm_target_cpu();
 
-	if (init->target != phys_target)
+	if (init->target != KVM_ARM_TARGET_GENERIC_V8 &&
+	    init->target != phys_target)
 		return -EINVAL;
 
 	/*
@@ -1541,9 +1545,9 @@ long kvm_arch_vm_ioctl(struct file *filp,
 		return kvm_vm_ioctl_set_device_addr(kvm, &dev_addr);
 	}
 	case KVM_ARM_PREFERRED_TARGET: {
-		struct kvm_vcpu_init init;
-
-		kvm_vcpu_preferred_target(&init);
+		struct kvm_vcpu_init init = {
+			.target = KVM_ARM_TARGET_GENERIC_V8,
+		};
 
 		if (copy_to_user(argp, &init, sizeof(init)))
 			return -EFAULT;
@@ -1557,9 +1561,59 @@ long kvm_arch_vm_ioctl(struct file *filp,
 			return -EFAULT;
 		return kvm_vm_ioctl_mte_copy_tags(kvm, &copy_tags);
 	}
+	case KVM_ARM_SET_COUNTER_OFFSET: {
+		struct kvm_arm_counter_offset offset;
+
+		if (copy_from_user(&offset, argp, sizeof(offset)))
+			return -EFAULT;
+		return kvm_vm_ioctl_set_counter_offset(kvm, &offset);
+	}
 	default:
 		return -EINVAL;
 	}
+}
+
+/* unlocks vcpus from @vcpu_lock_idx and smaller */
+static void unlock_vcpus(struct kvm *kvm, int vcpu_lock_idx)
+{
+	struct kvm_vcpu *tmp_vcpu;
+
+	for (; vcpu_lock_idx >= 0; vcpu_lock_idx--) {
+		tmp_vcpu = kvm_get_vcpu(kvm, vcpu_lock_idx);
+		mutex_unlock(&tmp_vcpu->mutex);
+	}
+}
+
+void unlock_all_vcpus(struct kvm *kvm)
+{
+	lockdep_assert_held(&kvm->lock);
+
+	unlock_vcpus(kvm, atomic_read(&kvm->online_vcpus) - 1);
+}
+
+/* Returns true if all vcpus were locked, false otherwise */
+bool lock_all_vcpus(struct kvm *kvm)
+{
+	struct kvm_vcpu *tmp_vcpu;
+	unsigned long c;
+
+	lockdep_assert_held(&kvm->lock);
+
+	/*
+	 * Any time a vcpu is in an ioctl (including running), the
+	 * core KVM code tries to grab the vcpu->mutex.
+	 *
+	 * By grabbing the vcpu->mutex of all VCPUs we ensure that no
+	 * other VCPUs can fiddle with the state while we access it.
+	 */
+	kvm_for_each_vcpu(c, tmp_vcpu, kvm) {
+		if (!mutex_trylock(&tmp_vcpu->mutex)) {
+			unlock_vcpus(kvm, c - 1);
+			return false;
+		}
+	}
+
+	return true;
 }
 
 static unsigned long nvhe_percpu_size(void)

@@ -245,10 +245,6 @@ int mt7921_dma_init(struct mt7921_dev *dev)
 	if (ret)
 		return ret;
 
-	ret = mt7921_wfsys_reset(dev);
-	if (ret)
-		return ret;
-
 	/* init tx queue */
 	ret = mt7921_init_tx_queues(&dev->phy, MT7921_TXQ_BAND0,
 				    MT7921_TX_RING_SIZE);
@@ -280,7 +276,7 @@ int mt7921_dma_init(struct mt7921_dev *dev)
 	/* Change mcu queue after firmware download */
 	ret = mt76_queue_alloc(dev, &dev->mt76.q_rx[MT_RXQ_MCU_WA],
 			       MT7921_RXQ_MCU_WM,
-			       MT7921_RX_MCU_RING_SIZE,
+			       MT7921_RX_MCU_WA_RING_SIZE,
 			       MT_RX_BUF_SIZE, MT_WFDMA0(0x540));
 	if (ret)
 		return ret;

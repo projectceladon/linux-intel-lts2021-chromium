@@ -276,11 +276,8 @@ Various hold-ups:
 - Need to switch to drm_fbdev_generic_setup(), otherwise a lot of the custom fb
   setup code can't be deleted.
 
-- Many drivers wrap drm_gem_fb_create() only to check for valid formats. For
-  atomic drivers we could check for valid formats by calling
-  drm_plane_check_pixel_format() against all planes, and pass if any plane
-  supports the format. For non-atomic that's not possible since like the format
-  list for the primary plane is fake and we'd therefor reject valid formats.
+- Need to switch to drm_gem_fb_create(), as now drm_gem_fb_create() checks for
+  valid formats for atomic drivers.
 
 - Many drivers subclass drm_framebuffer, we'd need a embedding compatible
   version of the varios drm_gem_fb_create functions. Maybe called
@@ -452,6 +449,49 @@ Drivers are pretty bad at doing this and there used to be conflicts among
 DRM and fbdev drivers. Still, it's the correct thing to do.
 
 Contact: Thomas Zimmermann <tzimmermann@suse.de>
+
+Level: Starter
+
+Clean up checks for already prepared/enabled in panels
+------------------------------------------------------
+
+In a whole pile of panel drivers, we have code to make the
+prepare/unprepare/enable/disable callbacks behave as no-ops if they've already
+been called. To get some idea of the duplicated code, try::
+
+  git grep 'if.*>prepared' -- drivers/gpu/drm/panel
+  git grep 'if.*>enabled' -- drivers/gpu/drm/panel
+
+In the patch ("drm/panel: Check for already prepared/enabled in drm_panel")
+we've moved this check to the core. Now we can most definitely remove the
+check from the individual panels and save a pile of code.
+
+In adition to removing the check from the individual panels, it is believed
+that even the core shouldn't need this check and that should be considered
+an error if other code ever relies on this check. The check in the core
+currently prints a warning whenever something is relying on this check with
+dev_warn(). After a little while, we likely want to promote this to a
+WARN(1) to help encourage folks not to rely on this behavior.
+
+Contact: Douglas Anderson <dianders@chromium.org>
+
+Level: Starter/Intermediate
+
+Transition away from using mipi_dsi_*_write_seq()
+-------------------------------------------------
+
+The macros mipi_dsi_generic_write_seq() and mipi_dsi_dcs_write_seq() are
+non-intuitive because, if there are errors, they return out of the *caller's*
+function. We should move all callers to use mipi_dsi_generic_write_seq_multi()
+and mipi_dsi_dcs_write_seq_multi() macros instead.
+
+Once all callers are transitioned, the macros and the functions that they call,
+mipi_dsi_generic_write_chatty() and mipi_dsi_dcs_write_buffer_chatty(), can
+probably be removed. Alternatively, if people feel like the _multi() variants
+are overkill for some use cases, we could keep the mipi_dsi_*_write_seq()
+variants but change them not to return out of the caller.
+
+Contact: Douglas Anderson <dianders@chromium.org>
 
 Level: Starter
 

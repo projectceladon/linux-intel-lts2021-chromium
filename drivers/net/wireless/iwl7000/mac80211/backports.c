@@ -1,8 +1,6 @@
 /*
  * Copyright(c) 2015 - 2017 Intel Deutschland GmbH
- * Copyright (C) 2018, 2020, 2022 Intel Corporation
- *
- * Backport functionality introduced in Linux 4.4.
+ * Copyright (C) 2018, 2020, 2022-2024 Intel Corporation
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -18,8 +16,10 @@
 #include <net/ip.h>
 #include <asm/unaligned.h>
 #include <linux/device.h>
+#include <net/cfg80211.h>
+#include "mac80211/ieee80211_i.h"
+#include "mac80211/driver-ops.h"
 
-#if CFG80211_VERSION < KERNEL_VERSION(5,18,0)
 static unsigned int __ieee80211_get_mesh_hdrlen(u8 flags)
 {
 	int ae = flags & MESH_FLAGS_AE;
@@ -117,7 +117,7 @@ int ieee80211_data_to_8023_exthdr(struct sk_buff *skb, struct ethhdr *ehdr,
 		if (iftype != NL80211_IFTYPE_ADHOC &&
 		    iftype != NL80211_IFTYPE_STATION &&
 		    iftype != NL80211_IFTYPE_OCB)
-				return -1;
+			return -1;
 		break;
 	}
 
@@ -146,345 +146,613 @@ int ieee80211_data_to_8023_exthdr(struct sk_buff *skb, struct ethhdr *ehdr,
 }
 EXPORT_SYMBOL(/* don't auto-generate a rename */
 	ieee80211_data_to_8023_exthdr);
-#endif /* LINUX_VERSION_CODE < KERNEL_VERSION(5,18,0) */
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,9,0)
-static void
-__frame_add_frag(struct sk_buff *skb, struct page *page,
-		 void *ptr, int len, int size)
-{
-	struct skb_shared_info *sh = skb_shinfo(skb);
-	int page_offset;
+struct ieee80211_per_bw_puncturing_values {
+	u8 len;
+	const u16 *valid_values;
+};
 
-	get_page(page);
-	page_offset = ptr - page_address(page);
-	skb_add_rx_frag(skb, sh->nr_frags, page, page_offset, len, size);
-}
+static const u16 puncturing_values_80mhz[] = {
+	0x8, 0x4, 0x2, 0x1
+};
 
-static void
-__ieee80211_amsdu_copy_frag(struct sk_buff *skb, struct sk_buff *frame,
-			    int offset, int len)
-{
-	struct skb_shared_info *sh = skb_shinfo(skb);
-	const skb_frag_t *frag = &sh->frags[0];
-	struct page *frag_page;
-	void *frag_ptr;
-	int frag_len, frag_size;
-	int head_size = skb->len - skb->data_len;
-	int cur_len;
+static const u16 puncturing_values_160mhz[] = {
+	 0x80, 0x40, 0x20, 0x10, 0x8, 0x4, 0x2, 0x1, 0xc0, 0x30, 0xc, 0x3
+};
 
-	frag_page = virt_to_head_page(skb->head);
-	frag_ptr = skb->data;
-	frag_size = head_size;
+static const u16 puncturing_values_320mhz[] = {
+	0xc000, 0x3000, 0xc00, 0x300, 0xc0, 0x30, 0xc, 0x3, 0xf000, 0xf00,
+	0xf0, 0xf, 0xfc00, 0xf300, 0xf0c0, 0xf030, 0xf00c, 0xf003, 0xc00f,
+	0x300f, 0xc0f, 0x30f, 0xcf, 0x3f
+};
 
-	while (offset >= frag_size) {
-		offset -= frag_size;
-		frag_page = skb_frag_page(frag);
-		frag_ptr = skb_frag_address(frag);
-		frag_size = skb_frag_size(frag);
-		frag++;
+#define IEEE80211_PER_BW_VALID_PUNCTURING_VALUES(_bw) \
+	{ \
+		.len = ARRAY_SIZE(puncturing_values_ ## _bw ## mhz), \
+		.valid_values = puncturing_values_ ## _bw ## mhz \
 	}
 
-	frag_ptr += offset;
-	frag_len = frag_size - offset;
+static const struct ieee80211_per_bw_puncturing_values per_bw_puncturing[] = {
+	IEEE80211_PER_BW_VALID_PUNCTURING_VALUES(80),
+	IEEE80211_PER_BW_VALID_PUNCTURING_VALUES(160),
+	IEEE80211_PER_BW_VALID_PUNCTURING_VALUES(320)
+};
 
-	cur_len = min(len, frag_len);
-
-	__frame_add_frag(frame, frag_page, frag_ptr, cur_len, frag_size);
-	len -= cur_len;
-
-	while (len > 0) {
-		frag_len = skb_frag_size(frag);
-		cur_len = min(len, frag_len);
-		__frame_add_frag(frame, skb_frag_page(frag),
-				 skb_frag_address(frag), cur_len, frag_len);
-		len -= cur_len;
-		frag++;
-	}
-}
-
-static struct sk_buff *
-__ieee80211_amsdu_copy(struct sk_buff *skb, unsigned int hlen,
-		       int offset, int len, bool reuse_frag)
+static bool
+ieee80211_valid_disable_subchannel_bitmap(u16 *bitmap, enum nl80211_chan_width bw)
 {
-	struct sk_buff *frame;
-	int cur_len = len;
+	u32 idx, i;
 
-	if (skb->len - offset < len)
-		return NULL;
-
-	/*
-	 * When reusing framents, copy some data to the head to simplify
-	 * ethernet header handling and speed up protocol header processing
-	 * in the stack later.
-	 */
-	if (reuse_frag)
-		cur_len = min_t(int, len, 32);
-
-	/*
-	 * Allocate and reserve two bytes more for payload
-	 * alignment since sizeof(struct ethhdr) is 14.
-	 */
-	frame = dev_alloc_skb(hlen + sizeof(struct ethhdr) + 2 + cur_len);
-	if (!frame)
-		return NULL;
-
-	skb_reserve(frame, hlen + sizeof(struct ethhdr) + 2);
-	skb_copy_bits(skb, offset, skb_put(frame, cur_len), cur_len);
-
-	len -= cur_len;
-	if (!len)
-		return frame;
-
-	offset += cur_len;
-	__ieee80211_amsdu_copy_frag(skb, frame, offset, len);
-
-	return frame;
-}
-
-void ieee80211_amsdu_to_8023s(struct sk_buff *skb, struct sk_buff_head *list,
-			      const u8 *addr, enum nl80211_iftype iftype,
-			      const unsigned int extra_headroom,
-			      const u8 *check_da, const u8 *check_sa)
-{
-	unsigned int hlen = ALIGN(extra_headroom, 4);
-	struct sk_buff *frame = NULL;
-	u16 ethertype;
-	u8 *payload;
-	int offset = 0, remaining;
-	struct ethhdr eth;
-	bool reuse_frag = skb->head_frag && !skb_has_frag_list(skb);
-	bool reuse_skb = false;
-	bool last = false;
-
-	while (!last) {
-		unsigned int subframe_len;
-		int len;
-		u8 padding;
-
-		skb_copy_bits(skb, offset, &eth, sizeof(eth));
-		len = ntohs(eth.h_proto);
-		subframe_len = sizeof(struct ethhdr) + len;
-		padding = (4 - subframe_len) & 0x3;
-
-		/* the last MSDU has no padding */
-		remaining = skb->len - offset;
-		if (subframe_len > remaining)
-			goto purge;
-
-		offset += sizeof(struct ethhdr);
-		last = remaining <= subframe_len + padding;
-
-		/* FIXME: should we really accept multicast DA? */
-		if ((check_da && !is_multicast_ether_addr(eth.h_dest) &&
-		     !ether_addr_equal(check_da, eth.h_dest)) ||
-		    (check_sa && !ether_addr_equal(check_sa, eth.h_source))) {
-			offset += len + padding;
-			continue;
-		}
-
-		/* reuse skb for the last subframe */
-		if (!skb_is_nonlinear(skb) && !reuse_frag && last) {
-			skb_pull(skb, offset);
-			frame = skb;
-			reuse_skb = true;
-		} else {
-			frame = __ieee80211_amsdu_copy(skb, hlen, offset, len,
-						       reuse_frag);
-			if (!frame)
-				goto purge;
-
-			offset += len + padding;
-		}
-
-		skb_reset_network_header(frame);
-		frame->dev = skb->dev;
-		frame->priority = skb->priority;
-
-		payload = frame->data;
-		ethertype = (payload[6] << 8) | payload[7];
-		if (likely((ether_addr_equal(payload, rfc1042_header) &&
-			    ethertype != ETH_P_AARP && ethertype != ETH_P_IPX) ||
-			   ether_addr_equal(payload, bridge_tunnel_header))) {
-			eth.h_proto = htons(ethertype);
-			skb_pull(frame, ETH_ALEN + 2);
-		}
-
-		memcpy(skb_push(frame, sizeof(eth)), &eth, sizeof(eth));
-		__skb_queue_tail(list, frame);
+	switch((int)bw) {
+	case NL80211_CHAN_WIDTH_80:
+		idx = 0;
+		break;
+	case NL80211_CHAN_WIDTH_160:
+		idx = 1;
+		break;
+	case NL80211_CHAN_WIDTH_320:
+		idx = 2;
+		break;
+	default:
+		*bitmap = 0;
+		break;
 	}
 
-	if (!reuse_skb)
-		dev_kfree_skb(skb);
+	if (!*bitmap)
+		return true;
 
-	return;
+	for (i = 0; i < per_bw_puncturing[idx].len; i++)
+		if (per_bw_puncturing[idx].valid_values[i] == *bitmap)
+			return true;
 
- purge:
-	__skb_queue_purge(list);
-	dev_kfree_skb(skb);
+	return false;
 }
-EXPORT_SYMBOL(/* don't auto-generate a rename */
-	ieee80211_amsdu_to_8023s);
+
+bool cfg80211_valid_disable_subchannel_bitmap(u16 *bitmap,
+					      struct cfg80211_chan_def *chandef)
+{
+	return ieee80211_valid_disable_subchannel_bitmap(bitmap, chandef->width);
+}
+
+static void cfg80211_wiphy_work(struct work_struct *work)
+{
+	struct ieee80211_local *local;
+	struct wiphy_work *wk;
+
+	local = container_of(work, struct ieee80211_local, wiphy_work);
+
+#if LINUX_VERSION_IS_LESS(5,12,0)
+	rtnl_lock();
+#else
+	wiphy_lock(local->hw.wiphy);
+#endif
+	if (local->suspended)
+		goto out;
+
+	spin_lock_irq(&local->wiphy_work_lock);
+	wk = list_first_entry_or_null(&local->wiphy_work_list,
+				      struct wiphy_work, entry);
+	if (wk) {
+		list_del_init(&wk->entry);
+		if (!list_empty(&local->wiphy_work_list))
+			schedule_work(work);
+		spin_unlock_irq(&local->wiphy_work_lock);
+
+		wk->func(local->hw.wiphy, wk);
+	} else {
+		spin_unlock_irq(&local->wiphy_work_lock);
+	}
+out:
+#if LINUX_VERSION_IS_LESS(5,12,0)
+	rtnl_unlock();
+#else
+	wiphy_unlock(local->hw.wiphy);
+#endif
+}
+
+void wiphy_work_setup(struct ieee80211_local *local)
+{
+	INIT_WORK(&local->wiphy_work, cfg80211_wiphy_work);
+	INIT_LIST_HEAD(&local->wiphy_work_list);
+	spin_lock_init(&local->wiphy_work_lock);
+}
+
+void wiphy_work_flush(struct wiphy *wiphy, struct wiphy_work *end)
+{
+	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
+	struct ieee80211_local *local = hw_to_local(hw);
+	struct wiphy_work *wk;
+	unsigned long flags;
+	int runaway_limit = 100;
+
+	lockdep_assert_wiphy(wiphy);
+
+	spin_lock_irqsave(&local->wiphy_work_lock, flags);
+	while (!list_empty(&local->wiphy_work_list)) {
+		struct wiphy_work *wk;
+
+		wk = list_first_entry(&local->wiphy_work_list,
+				      struct wiphy_work, entry);
+		list_del_init(&wk->entry);
+		spin_unlock_irqrestore(&local->wiphy_work_lock, flags);
+
+		wk->func(local->hw.wiphy, wk);
+
+		spin_lock_irqsave(&local->wiphy_work_lock, flags);
+
+		if (wk == end)
+			break;
+
+		if (WARN_ON(--runaway_limit == 0))
+			INIT_LIST_HEAD(&local->wiphy_work_list);
+	}
+	spin_unlock_irqrestore(&local->wiphy_work_lock, flags);
+}
+EXPORT_SYMBOL(wiphy_work_flush);
+
+void wiphy_delayed_work_flush(struct wiphy *wiphy,
+			      struct wiphy_delayed_work *dwork)
+{
+	del_timer_sync(&dwork->timer);
+	wiphy_work_flush(wiphy, &dwork->work);
+}
+EXPORT_SYMBOL(wiphy_delayed_work_flush);
+
+void wiphy_work_teardown(struct ieee80211_local *local)
+{
+#if LINUX_VERSION_IS_LESS(5,12,0)
+	rtnl_lock();
+#else
+	wiphy_lock(local->hw.wiphy);
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,7,0)
-#include <linux/devcoredump.h>
+	wiphy_work_flush(local->hw.wiphy, NULL);
 
-static void devcd_free_sgtable(void *data)
+#if LINUX_VERSION_IS_LESS(5,12,0)
+	rtnl_unlock();
+#else
+	wiphy_unlock(local->hw.wiphy);
+#endif
+
+	cancel_work_sync(&local->wiphy_work);
+}
+
+void wiphy_work_queue(struct wiphy *wiphy, struct wiphy_work *work)
 {
-	struct scatterlist *table = data;
-	int i;
-	struct page *page;
-	struct scatterlist *iter;
-	struct scatterlist *delete_iter;
+	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
+	struct ieee80211_local *local = hw_to_local(hw);
+	unsigned long flags;
 
-	/* free pages */
-	iter = table;
-	for_each_sg(table, iter, sg_nents(table), i) {
-		page = sg_page(iter);
-		if (page)
-			__free_page(page);
+	spin_lock_irqsave(&local->wiphy_work_lock, flags);
+	if (list_empty(&work->entry))
+		list_add_tail(&work->entry, &local->wiphy_work_list);
+	spin_unlock_irqrestore(&local->wiphy_work_lock, flags);
+
+	schedule_work(&local->wiphy_work);
+}
+EXPORT_SYMBOL_GPL(wiphy_work_queue);
+
+void wiphy_work_cancel(struct wiphy *wiphy, struct wiphy_work *work)
+{
+	struct ieee80211_hw *hw = wiphy_to_ieee80211_hw(wiphy);
+	struct ieee80211_local *local = hw_to_local(hw);
+	unsigned long flags;
+
+#if LINUX_VERSION_IS_LESS(5,12,0)
+	ASSERT_RTNL();
+#else
+	lockdep_assert_held(&wiphy->mtx);
+#endif
+
+	spin_lock_irqsave(&local->wiphy_work_lock, flags);
+	if (!list_empty(&work->entry))
+		list_del_init(&work->entry);
+	spin_unlock_irqrestore(&local->wiphy_work_lock, flags);
+}
+EXPORT_SYMBOL_GPL(wiphy_work_cancel);
+
+void wiphy_delayed_work_timer(struct timer_list *t)
+{
+	struct wiphy_delayed_work *dwork = from_timer(dwork, t, timer);
+
+	wiphy_work_queue(dwork->wiphy, &dwork->work);
+}
+EXPORT_SYMBOL(wiphy_delayed_work_timer);
+
+void wiphy_delayed_work_queue(struct wiphy *wiphy,
+			      struct wiphy_delayed_work *dwork,
+			      unsigned long delay)
+{
+	if (!delay) {
+		del_timer(&dwork->timer);
+		wiphy_work_queue(wiphy, &dwork->work);
+		return;
 	}
 
-	/* then free all chained tables */
-	iter = table;
-	delete_iter = table;	/* always points on a head of a table */
-	while (!sg_is_last(iter)) {
-		iter++;
-		if (sg_is_chain(iter)) {
-			iter = sg_chain_ptr(iter);
-			kfree(delete_iter);
-			delete_iter = iter;
-		}
+	dwork->wiphy = wiphy;
+	mod_timer(&dwork->timer, jiffies + delay);
+}
+EXPORT_SYMBOL_GPL(wiphy_delayed_work_queue);
+
+void wiphy_delayed_work_cancel(struct wiphy *wiphy,
+			       struct wiphy_delayed_work *dwork)
+{
+	lockdep_assert_held(&wiphy->mtx);
+
+	del_timer_sync(&dwork->timer);
+	wiphy_work_cancel(wiphy, &dwork->work);
+}
+EXPORT_SYMBOL_GPL(wiphy_delayed_work_cancel);
+
+void ieee80211_fragment_element(struct sk_buff *skb, u8 *len_pos, u8 frag_id)
+{
+	unsigned int elem_len;
+
+	if (!len_pos)
+		return;
+
+	elem_len = skb->data + skb->len - len_pos - 1;
+
+	while (elem_len > 255) {
+		/* this one is 255 */
+		*len_pos = 255;
+		/* remaining data gets smaller */
+		elem_len -= 255;
+		/* make space for the fragment ID/len in SKB */
+		skb_put(skb, 2);
+		/* shift back the remaining data to place fragment ID/len */
+		memmove(len_pos + 255 + 3, len_pos + 255 + 1, elem_len);
+		/* place the fragment ID */
+		len_pos += 255 + 1;
+		*len_pos = frag_id;
+		/* and point to fragment length to update later */
+		len_pos++;
 	}
 
-	/* free the last table */
-	kfree(delete_iter);
+	*len_pos = elem_len;
 }
+EXPORT_SYMBOL(ieee80211_fragment_element);
 
-static ssize_t devcd_read_from_sgtable(char *buffer, loff_t offset,
-				       size_t buf_len, void *data,
-				       size_t data_len)
+int nl80211_chan_width_to_mhz(enum nl80211_chan_width chan_width)
 {
-	struct scatterlist *table = data;
+	int mhz;
 
-	if (offset > data_len)
-		return -EINVAL;
-
-	if (offset + buf_len > data_len)
-		buf_len = data_len - offset;
-	return sg_pcopy_to_buffer(table, sg_nents(table), buffer, buf_len,
-				  offset);
-}
-
-void dev_coredumpsg(struct device *dev, struct scatterlist *table,
-		    size_t datalen, gfp_t gfp)
-{
-	/*
-	 * those casts are needed due to const issues, but it's fine
-	 * since calling convention for const/non-const is identical
-	 */
-	dev_coredumpm(dev, THIS_MODULE, table, datalen, gfp,
-		      (void *)devcd_read_from_sgtable,
-		      (void *)devcd_free_sgtable);
-}
-EXPORT_SYMBOL_GPL(dev_coredumpsg);
-#endif /* < 4.7.0 */
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(4,6,0)
-int kstrtobool(const char *s, bool *res)
-{
-	if (!s)
-		return -EINVAL;
-
-	switch (s[0]) {
-	case 'y':
-	case 'Y':
-	case '1':
-		*res = true;
-		return 0;
-	case 'n':
-	case 'N':
-	case '0':
-		*res = false;
-		return 0;
-	case 'o':
-	case 'O':
-		switch (s[1]) {
-		case 'n':
-		case 'N':
-			*res = true;
-			return 0;
-		case 'f':
-		case 'F':
-			*res = false;
-			return 0;
-		default:
-			break;
-		}
-	default:
+	switch((int)chan_width) {
+	case NL80211_CHAN_WIDTH_1:
+		mhz = 1;
 		break;
+	case NL80211_CHAN_WIDTH_2:
+		mhz = 2;
+		break;
+	case NL80211_CHAN_WIDTH_4:
+		mhz = 4;
+		break;
+	case NL80211_CHAN_WIDTH_8:
+		mhz = 8;
+		break;
+	case NL80211_CHAN_WIDTH_16:
+		mhz = 16;
+		break;
+	case NL80211_CHAN_WIDTH_5:
+		mhz = 5;
+		break;
+	case NL80211_CHAN_WIDTH_10:
+		mhz = 10;
+		break;
+	case NL80211_CHAN_WIDTH_20:
+	case NL80211_CHAN_WIDTH_20_NOHT:
+		mhz = 20;
+		break;
+	case NL80211_CHAN_WIDTH_40:
+		mhz = 40;
+		break;
+	case NL80211_CHAN_WIDTH_80P80:
+	case NL80211_CHAN_WIDTH_80:
+		mhz = 80;
+		break;
+	case NL80211_CHAN_WIDTH_160:
+		mhz = 160;
+		break;
+	case NL80211_CHAN_WIDTH_320:
+		mhz = 320;
+		break;
+	default:
+		WARN_ON_ONCE(1);
+		return -1;
 	}
-
-	return -EINVAL;
+	return mhz;
 }
-EXPORT_SYMBOL_GPL(kstrtobool);
+EXPORT_SYMBOL_GPL(nl80211_chan_width_to_mhz);
 
-int kstrtobool_from_user(const char __user *s, size_t count, bool *res)
+static int cfg80211_chandef_get_width(const struct cfg80211_chan_def *c)
 {
-	/* Longest string needed to differentiate, newline, terminator */
-	char buf[4];
-
-	count = min(count, sizeof(buf) - 1);
-	if (copy_from_user(buf, s, count))
-		return -EFAULT;
-	buf[count] = '\0';
-	return kstrtobool(buf, res);
+	return nl80211_chan_width_to_mhz(c->width);
 }
-EXPORT_SYMBOL_GPL(kstrtobool_from_user);
-#endif /* < 4.6.0 */
 
-#if CFG80211_VERSION < KERNEL_VERSION(5,8,0)
-#include "mac80211/ieee80211_i.h"
-#include "mac80211/driver-ops.h"
-
-void ieee80211_mgmt_frame_register(struct wiphy *wiphy,
-				   struct wireless_dev *wdev,
-				   u16 frame_type, bool reg)
+int cfg80211_chandef_primary(const struct cfg80211_chan_def *c,
+			     enum nl80211_chan_width primary_chan_width,
+			     u16 *punctured)
 {
-        struct ieee80211_local *local = wiphy_priv(wiphy);
-        struct ieee80211_sub_if_data *sdata = IEEE80211_WDEV_TO_SUB_IF(wdev);
+	int pri_width = nl80211_chan_width_to_mhz(primary_chan_width);
+	int width = cfg80211_chandef_get_width(c);
+	u32 control = c->chan->center_freq;
+	u32 center = c->center_freq1;
+	u16 _punct = 0;
 
-	switch (frame_type) {
-	case IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_PROBE_REQ:
-		if (reg) {
-			local->probe_req_reg = true;
-			sdata->vif.probe_req_reg = true;
+	if (WARN_ON_ONCE(pri_width < 0 || width < 0))
+		return -1;
+
+	/* not intended to be called this way, can't determine */
+	if (WARN_ON_ONCE(pri_width > width))
+		return -1;
+
+	if (!punctured)
+		punctured = &_punct;
+
+#if LINUX_VERSION_IS_GEQ(6,9,0)
+	*punctured = 0;
+#endif
+
+	while (width > pri_width) {
+		unsigned int bits_to_drop = width / 20 / 2;
+
+		if (control > center) {
+			center += width / 4;
+			*punctured >>= bits_to_drop;
 		} else {
-			if (local->probe_req_reg)
-				local->probe_req_reg = false;
+			center -= width / 4;
+			*punctured &= (1 << bits_to_drop) - 1;
+		}
+		width /= 2;
+	}
 
-			if (sdata->vif.probe_req_reg)
-				sdata->vif.probe_req_reg = false;
+	return center;
+}
+
+bool
+ieee80211_uhb_power_type_valid(struct ieee80211_mgmt *mgmt, size_t len,
+			       struct ieee80211_channel *channel)
+{
+	const struct element *tmp;
+	struct ieee80211_he_operation *he_oper;
+	bool ret = false;
+	size_t ielen, min_hdr_len;
+	u8 *variable = mgmt->u.probe_resp.variable;
+
+	min_hdr_len = offsetof(struct ieee80211_mgmt,
+			       u.probe_resp.variable);
+	ielen = len - min_hdr_len;
+
+	if (channel->band != NL80211_BAND_6GHZ)
+		return true;
+
+	tmp = cfg80211_find_ext_elem(WLAN_EID_EXT_HE_OPERATION,
+				     variable, ielen);
+	if (tmp && tmp->datalen >= sizeof(*he_oper) + 1) {
+		const struct ieee80211_he_6ghz_oper *he_6ghz_oper;
+
+		he_oper = (void *)&tmp->data[1];
+		he_6ghz_oper = ieee80211_he_6ghz_oper(he_oper);
+		if (!he_6ghz_oper)
+			return false;
+
+		switch (u8_get_bits(he_6ghz_oper->control,
+				    IEEE80211_HE_6GHZ_OPER_CTRL_REG_INFO)) {
+		case IEEE80211_6GHZ_CTRL_REG_LPI_AP:
+		case IEEE80211_6GHZ_CTRL_REG_INDOOR_LPI_AP:
+			return true;
+		case IEEE80211_6GHZ_CTRL_REG_SP_AP:
+		case IEEE80211_6GHZ_CTRL_REG_INDOOR_SP_AP:
+			return !(channel->flags &
+				 IEEE80211_CHAN_NO_6GHZ_AFC_CLIENT);
+		case IEEE80211_6GHZ_CTRL_REG_VLP_AP:
+			return !(channel->flags &
+				 IEEE80211_CHAN_NO_6GHZ_VLP_CLIENT);
+		default:
+			return false;
+		}
+	}
+	return false;
+}
+
+bool cfg80211_iter_rnr(const u8 *elems, size_t elems_len,
+		       enum cfg80211_rnr_iter_ret
+		       (*iter)(void *data, u8 type,
+			       const struct ieee80211_neighbor_ap_info *info,
+			       const u8 *tbtt_info, u8 tbtt_info_len),
+		       void *iter_data)
+{
+	const struct element *rnr;
+	const u8 *pos, *end;
+
+	for_each_element_id(rnr, WLAN_EID_REDUCED_NEIGHBOR_REPORT,
+			    elems, elems_len) {
+		const struct ieee80211_neighbor_ap_info *info;
+
+		pos = rnr->data;
+		end = rnr->data + rnr->datalen;
+
+		/* RNR IE may contain more than one NEIGHBOR_AP_INFO */
+		while (sizeof(*info) <= end - pos) {
+			u8 length, i, count;
+			u8 type;
+
+			info = (void *)pos;
+			count = u8_get_bits(info->tbtt_info_hdr,
+					    IEEE80211_AP_INFO_TBTT_HDR_COUNT) +
+				1;
+			length = info->tbtt_info_len;
+
+			pos += sizeof(*info);
+
+			if (count * length > end - pos)
+				return false;
+
+			type = u8_get_bits(info->tbtt_info_hdr,
+					   IEEE80211_AP_INFO_TBTT_HDR_TYPE);
+
+			for (i = 0; i < count; i++) {
+				switch (iter(iter_data, type, info,
+					     pos, length)) {
+				case RNR_ITER_CONTINUE:
+					break;
+				case RNR_ITER_BREAK:
+					return true;
+				case RNR_ITER_ERROR:
+					return false;
+				}
+
+				pos += length;
+			}
 		}
 
-		if (!local->open_count)
+		if (pos != end)
+			return false;
+	}
+
+	return true;
+}
+
+ssize_t cfg80211_defragment_element(const struct element *elem, const u8 *ies,
+				    size_t ieslen, u8 *data, size_t data_len,
+				    u8 frag_id)
+{
+	const struct element *next;
+	ssize_t copied;
+	u8 elem_datalen;
+
+	if (!elem)
+		return -EINVAL;
+
+	/* elem might be invalid after the memmove */
+	next = (void *)(elem->data + elem->datalen);
+	elem_datalen = elem->datalen;
+
+	if (elem->id == WLAN_EID_EXTENSION) {
+		copied = elem->datalen - 1;
+
+		if (data) {
+			if (copied > data_len)
+				return -ENOSPC;
+
+			memmove(data, elem->data + 1, copied);
+		}
+	} else {
+		copied = elem->datalen;
+
+		if (data) {
+			if (copied > data_len)
+				return -ENOSPC;
+
+			memmove(data, elem->data, copied);
+		}
+	}
+
+	/* Fragmented elements must have 255 bytes */
+	if (elem_datalen < 255)
+		return copied;
+
+	for (elem = next;
+	     elem->data < ies + ieslen &&
+		elem->data + elem->datalen <= ies + ieslen;
+	     elem = next) {
+		/* elem might be invalid after the memmove */
+		next = (void *)(elem->data + elem->datalen);
+
+		if (elem->id != frag_id)
 			break;
 
-		if (ieee80211_sdata_running(sdata)) {
-			if (sdata->vif.probe_req_reg == 1)
-				drv_config_iface_filter(local, sdata,
-							FIF_PROBE_REQ,
-							FIF_PROBE_REQ);
-			else if (sdata->vif.probe_req_reg == 0)
-				drv_config_iface_filter(local, sdata, 0,
-							FIF_PROBE_REQ);
+		elem_datalen = elem->datalen;
+
+		if (data) {
+			if (copied + elem_datalen > data_len)
+				return -ENOSPC;
+
+			memmove(data + copied, elem->data, elem_datalen);
 		}
 
-                ieee80211_configure_filter(local);
-		break;
+		copied += elem_datalen;
+
+		/* Only the last fragment may be short */
+		if (elem_datalen != 255)
+			break;
+	}
+
+	return copied;
+}
+EXPORT_SYMBOL(cfg80211_defragment_element);
+
+bool ieee80211_operating_class_to_chandef(u8 operating_class,
+					  struct ieee80211_channel *chan,
+					  struct cfg80211_chan_def *chandef)
+{
+	u32 control_freq, offset = 0;
+	enum nl80211_band band;
+
+	if (!ieee80211_operating_class_to_band(operating_class, &band) ||
+	    !chan || band != chan->band)
+		return false;
+
+	control_freq = chan->center_freq;
+	chandef->chan = chan;
+
+	if (control_freq >= 5955)
+		offset = control_freq - 5955;
+	else if (control_freq >= 5745)
+		offset = control_freq - 5745;
+	else if (control_freq >= 5180)
+		offset = control_freq - 5180;
+	offset /= 20;
+
+	switch (operating_class) {
+	case 81:  /* 2 GHz band; 20 MHz; channels 1..13 */
+	case 82:  /* 2 GHz band; 20 MHz; channel 14 */
+	case 115: /* 5 GHz band; 20 MHz; channels 36,40,44,48 */
+	case 118: /* 5 GHz band; 20 MHz; channels 52,56,60,64 */
+	case 121: /* 5 GHz band; 20 MHz; channels 100..144 */
+	case 124: /* 5 GHz band; 20 MHz; channels 149,153,157,161 */
+	case 125: /* 5 GHz band; 20 MHz; channels 149..177 */
+	case 131: /* 6 GHz band; 20 MHz; channels 1..233*/
+	case 136: /* 6 GHz band; 20 MHz; channel 2 */
+		chandef->center_freq1 = control_freq;
+		chandef->width = NL80211_CHAN_WIDTH_20;
+		return true;
+	case 83:  /* 2 GHz band; 40 MHz; channels 1..9 */
+	case 116: /* 5 GHz band; 40 MHz; channels 36,44 */
+	case 119: /* 5 GHz band; 40 MHz; channels 52,60 */
+	case 122: /* 5 GHz band; 40 MHz; channels 100,108,116,124,132,140 */
+	case 126: /* 5 GHz band; 40 MHz; channels 149,157,165,173 */
+		chandef->center_freq1 = control_freq + 10;
+		chandef->width = NL80211_CHAN_WIDTH_40;
+		return true;
+	case 84:  /* 2 GHz band; 40 MHz; channels 5..13 */
+	case 117: /* 5 GHz band; 40 MHz; channels 40,48 */
+	case 120: /* 5 GHz band; 40 MHz; channels 56,64 */
+	case 123: /* 5 GHz band; 40 MHz; channels 104,112,120,128,136,144 */
+	case 127: /* 5 GHz band; 40 MHz; channels 153,161,169,177 */
+		chandef->center_freq1 = control_freq - 10;
+		chandef->width = NL80211_CHAN_WIDTH_40;
+		return true;
+	case 132: /* 6 GHz band; 40 MHz; channels 1,5,..,229*/
+		chandef->center_freq1 = control_freq + 10 - (offset & 1) * 20;
+		chandef->width = NL80211_CHAN_WIDTH_40;
+		return true;
+	case 128: /* 5 GHz band; 80 MHz; channels 36..64,100..144,149..177 */
+	case 133: /* 6 GHz band; 80 MHz; channels 1,5,..,229 */
+		chandef->center_freq1 = control_freq + 30 - (offset & 3) * 20;
+		chandef->width = NL80211_CHAN_WIDTH_80;
+		return true;
+	case 129: /* 5 GHz band; 160 MHz; channels 36..64,100..144,149..177 */
+	case 134: /* 6 GHz band; 160 MHz; channels 1,5,..,229 */
+		chandef->center_freq1 = control_freq + 70 - (offset & 7) * 20;
+		chandef->width = NL80211_CHAN_WIDTH_160;
+		return true;
+	case 130: /* 5 GHz band; 80+80 MHz; channels 36..64,100..144,149..177 */
+	case 135: /* 6 GHz band; 80+80 MHz; channels 1,5,..,229 */
+		  /* The center_freq2 of 80+80 MHz is unknown */
+	case 137: /* 6 GHz band; 320 MHz; channels 1,5,..,229 */
+		  /* 320-1 or 320-2 channelization is unknown */
 	default:
-		break;
+		return false;
 	}
 }
-#endif /* < 5.8 */

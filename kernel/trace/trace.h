@@ -29,6 +29,9 @@
 #include <asm/syscall.h>	/* some archs define it here */
 #endif
 
+#define TRACE_MODE_WRITE	0640
+#define TRACE_MODE_READ		0440
+
 enum trace_type {
 	__TRACE_FIRST_TYPE = 0,
 
@@ -109,6 +112,12 @@ enum trace_type {
 /* Use this for memory failure errors */
 #define MEM_FAIL(condition, fmt, ...)					\
 	DO_ONCE_LITE_IF(condition, pr_err, "ERROR: " fmt, ##__VA_ARGS__)
+
+#define FAULT_STRING "(fault)"
+
+#define HIST_STACKTRACE_DEPTH	16
+#define HIST_STACKTRACE_SIZE	(HIST_STACKTRACE_DEPTH * sizeof(unsigned long))
+#define HIST_STACKTRACE_SKIP	5
 
 /*
  * syscalls are special, and need special handling, this is why
@@ -316,6 +325,7 @@ struct trace_array {
 #endif
 	struct trace_pid_list	__rcu *filtered_pids;
 	struct trace_pid_list	__rcu *filtered_no_pids;
+	struct pid_namespace __rcu *filtered_ns;
 	/*
 	 * max_lock is used to protect the swapping of buffers
 	 * when taking a max snapshot. The buffers themselves are
@@ -348,16 +358,19 @@ struct trace_array {
 	unsigned char		trace_flags_index[TRACE_FLAGS_MAX_SIZE];
 	unsigned int		flags;
 	raw_spinlock_t		start_lock;
+	const char		*system_names;
 	struct list_head	err_log;
 	struct dentry		*dir;
 	struct dentry		*options;
 	struct dentry		*percpu_dir;
-	struct dentry		*event_dir;
+	struct eventfs_inode	*event_dir;
 	struct trace_options	*topts;
 	struct list_head	systems;
 	struct list_head	events;
 	struct trace_event_file *trace_marker_file;
 	cpumask_var_t		tracing_cpumask; /* only trace on set CPUs */
+	/* one per_cpu trace_pipe can be opened by only one user */
+	cpumask_var_t		pipe_cpumask;
 	int			ref;
 	int			trace_ref;
 #ifdef CONFIG_FUNCTION_TRACER
@@ -580,6 +593,9 @@ void tracing_reset_all_online_cpus(void);
 void tracing_reset_all_online_cpus_unlocked(void);
 int tracing_open_generic(struct inode *inode, struct file *filp);
 int tracing_open_generic_tr(struct inode *inode, struct file *filp);
+int tracing_open_file_tr(struct inode *inode, struct file *filp);
+int tracing_release_file_tr(struct inode *inode, struct file *filp);
+int tracing_single_release_file_tr(struct inode *inode, struct file *filp);
 bool tracing_is_disabled(void);
 bool tracer_tracing_is_on(struct trace_array *tr);
 void tracer_tracing_on(struct trace_array *tr);
@@ -598,6 +614,7 @@ struct ring_buffer_event *
 trace_buffer_lock_reserve(struct trace_buffer *buffer,
 			  int type,
 			  unsigned long len,
+			  unsigned long trace_flags,
 			  unsigned int trace_ctx);
 
 struct trace_entry *tracing_get_trace_entry(struct trace_array *tr,
@@ -668,6 +685,7 @@ bool trace_find_filtered_pid(struct trace_pid_list *filtered_pids,
 			     pid_t search_pid);
 bool trace_ignore_this_task(struct trace_pid_list *filtered_pids,
 			    struct trace_pid_list *filtered_no_pids,
+			    struct pid_namespace *filtered_ns,
 			    struct task_struct *task);
 void trace_filter_add_remove_task(struct trace_pid_list *pid_list,
 				  struct task_struct *self,
@@ -1209,6 +1227,7 @@ extern int trace_get_user(struct trace_parser *parser, const char __user *ubuf,
 		C(EVENT_FORK,		"event-fork"),		\
 		C(PAUSE_ON_TRACE,	"pause-on-trace"),	\
 		C(HASH_PTR,		"hash-ptr"),	/* Print hashed pointer */ \
+		C(PID_IN_NS,		"pid-in-ns"),		\
 		FUNCTION_FLAGS					\
 		FGRAPH_FLAGS					\
 		STACK_FLAGS					\
@@ -1300,7 +1319,7 @@ struct trace_subsystem_dir {
 	struct list_head		list;
 	struct event_subsystem		*subsystem;
 	struct trace_array		*tr;
-	struct dentry			*entry;
+	struct eventfs_inode		*ei;
 	int				ref_count;
 	int				nr_events;
 };
@@ -1518,6 +1537,29 @@ static inline void *event_file_data(struct file *filp)
 extern struct mutex event_mutex;
 extern struct list_head ftrace_events;
 
+/*
+ * When the trace_event_file is the filp->i_private pointer,
+ * it must be taken under the event_mutex lock, and then checked
+ * if the EVENT_FILE_FL_FREED flag is set. If it is, then the
+ * data pointed to by the trace_event_file can not be trusted.
+ *
+ * Use the event_file_file() to access the trace_event_file from
+ * the filp the first time under the event_mutex and check for
+ * NULL. If it is needed to be retrieved again and the event_mutex
+ * is still held, then the event_file_data() can be used and it
+ * is guaranteed to be valid.
+ */
+static inline struct trace_event_file *event_file_file(struct file *filp)
+{
+	struct trace_event_file *file;
+
+	lockdep_assert_held(&event_mutex);
+	file = READ_ONCE(file_inode(filp)->i_private);
+	if (!file || file->flags & EVENT_FILE_FL_FREED)
+		return NULL;
+	return file;
+}
+
 extern const struct file_operations event_trigger_fops;
 extern const struct file_operations event_hist_fops;
 extern const struct file_operations event_hist_debug_fops;
@@ -1606,6 +1648,9 @@ get_named_trigger_data(struct event_trigger_data *data);
 extern int register_event_command(struct event_command *cmd);
 extern int unregister_event_command(struct event_command *cmd);
 extern int register_trigger_hist_enable_disable_cmds(void);
+
+extern void event_file_get(struct trace_event_file *file);
+extern void event_file_put(struct trace_event_file *file);
 
 /**
  * struct event_trigger_ops - callbacks for trace event triggers

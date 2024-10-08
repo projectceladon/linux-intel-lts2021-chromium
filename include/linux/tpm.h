@@ -138,8 +138,6 @@ struct tpm_chip {
 	int dev_num;		/* /dev/tpm# */
 	unsigned long is_open;	/* only one allowed */
 
-	bool is_suspended;
-
 	char hwrng_name[64];
 	struct hwrng hwrng;
 
@@ -155,7 +153,7 @@ struct tpm_chip {
 
 	struct dentry *bios_dir[TPM_NUM_EVENT_LOG_FILES];
 
-	const struct attribute_group *groups[4 + TPM_MAX_HASHES];
+	const struct attribute_group *groups[3 + TPM_MAX_HASHES];
 	unsigned int groups_cnt;
 
 	u32 nr_allocated_banks;
@@ -307,6 +305,7 @@ enum tpm_chip_flags {
 	TPM_CHIP_FLAG_HAVE_TIMEOUTS	= BIT(4),
 	TPM_CHIP_FLAG_ALWAYS_POWERED	= BIT(5),
 	TPM_CHIP_FLAG_FIRMWARE_POWER_MANAGED	= BIT(6),
+	TPM_CHIP_FLAG_SUSPENDED			= BIT(7),
 };
 
 #define to_tpm_chip(d) container_of(d, struct tpm_chip, dev)

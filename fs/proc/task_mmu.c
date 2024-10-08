@@ -206,7 +206,7 @@ static int proc_maps_open(struct inode *inode, struct file *file,
 		return -ENOMEM;
 
 	priv->inode = inode;
-	priv->mm = proc_mem_open(inode, PTRACE_MODE_READ);
+	priv->mm = proc_mem_open(file, PTRACE_MODE_READ);
 	if (IS_ERR(priv->mm)) {
 		int err = PTR_ERR(priv->mm);
 
@@ -1087,7 +1087,7 @@ static int smaps_rollup_open(struct inode *inode, struct file *file)
 		goto out_free;
 
 	priv->inode = inode;
-	priv->mm = proc_mem_open(inode, PTRACE_MODE_READ);
+	priv->mm = proc_mem_open(file, PTRACE_MODE_READ);
 	if (IS_ERR(priv->mm)) {
 		ret = PTR_ERR(priv->mm);
 
@@ -1614,6 +1614,8 @@ static int pagemap_pmd_range(pmd_t *pmdp, unsigned long addr, unsigned long end,
 		}
 #endif
 
+		if (page && !PageAnon(page))
+			flags |= PM_FILE;
 		if (page && !migration && page_mapcount(page) == 1)
 			flags |= PM_MMAP_EXCLUSIVE;
 
@@ -1833,7 +1835,7 @@ static int pagemap_open(struct inode *inode, struct file *file)
 {
 	struct mm_struct *mm;
 
-	mm = proc_mem_open(inode, PTRACE_MODE_READ);
+	mm = proc_mem_open(file, PTRACE_MODE_READ);
 	if (IS_ERR(mm))
 		return PTR_ERR(mm);
 	file->private_data = mm;
@@ -1983,6 +1985,7 @@ static int reclaim_pte_range(pmd_t *pmd, unsigned long addr,
 	enum reclaim_type type = 0;
 	struct mm_struct *mm = vma->vm_mm;
 	unsigned long next = pmd_addr_end(addr, end);
+	unsigned int batch_count = 0;
 
 	if (data)
 		type = data->type;
@@ -2041,8 +2044,10 @@ huge_unlock:
 regular_page:
 	if (pmd_trans_unstable(pmd))
 		return 0;
-
+restart:
 	orig_pte = pte_offset_map_lock(vma->vm_mm, pmd, addr, &ptl);
+	if (!orig_pte)
+		return 0;
 	for (pte = orig_pte; addr < end; pte++, addr += PAGE_SIZE) {
 		if (!data->nr_to_try)
 			break;
@@ -2053,6 +2058,16 @@ regular_page:
 		page = vm_normal_page(vma, addr, ptent);
 		if (!page)
 			continue;
+
+		if (++batch_count == SWAP_CLUSTER_MAX) {
+			batch_count = 0;
+			if (need_resched()) {
+				arch_leave_lazy_mmu_mode();
+				pte_unmap_unlock(orig_pte, ptl);
+				cond_resched();
+				goto restart;
+			}
+		}
 
 		if (PageTransCompound(page)) {
 			if (type != RECLAIM_SHMEM && page_mapcount(page) != 1)

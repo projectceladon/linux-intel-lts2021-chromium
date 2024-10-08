@@ -185,6 +185,9 @@ struct kvm_arch {
 	/* Interrupt controller */
 	struct vgic_dist	vgic;
 
+	/* Timers */
+	struct arch_timer_vm_data timer_data;
+
 	/* Mandated version of PSCI */
 	u32 psci_version;
 
@@ -200,6 +203,7 @@ struct kvm_arch {
 	/* Guest has bought into the MMIO guard extension */
 #define KVM_ARCH_FLAG_MMIO_GUARD			2
 	unsigned long flags;
+	bool vm_counter_offset;
 
 	/*
 	 * VM-wide PMU filter, implemented as a bitmap and big enough for
@@ -544,6 +548,14 @@ struct kvm_vcpu_arch {
  */
 #define KVM_ARM64_INCREMENT_PC		(1 << 9) /* Increment PC */
 #define KVM_ARM64_EXCEPT_MASK		(7 << 9) /* Target EL/MODE */
+#define KVM_ARM64_DEBUG_STATE_SAVE_SPE	(1 << 12) /* Save SPE context if active  */
+#define KVM_ARM64_DEBUG_STATE_SAVE_TRBE	(1 << 13) /* Save TRBE context if active  */
+#define KVM_ARM64_VCPU_IN_WFI		(1 << 14) /* WFI instruction trapped */
+
+#define KVM_GUESTDBG_VALID_MASK (KVM_GUESTDBG_ENABLE | \
+				 KVM_GUESTDBG_USE_SW_BP | \
+				 KVM_GUESTDBG_USE_HW | \
+				 KVM_GUESTDBG_SINGLESTEP)
 /*
  * When KVM_ARM64_PENDING_EXCEPTION is set, KVM_ARM64_EXCEPT_MASK can
  * take the following values:
@@ -729,7 +741,6 @@ struct kvm_vcpu_stat {
 	u64 exits;
 };
 
-void kvm_vcpu_preferred_target(struct kvm_vcpu_init *init);
 unsigned long kvm_arm_num_regs(struct kvm_vcpu *vcpu);
 int kvm_arm_copy_reg_indices(struct kvm_vcpu *vcpu, u64 __user *indices);
 int kvm_arm_get_reg(struct kvm_vcpu *vcpu, const struct kvm_one_reg *reg);
@@ -815,6 +826,9 @@ void kvm_reset_sys_regs(struct kvm_vcpu *vcpu);
 
 void kvm_sys_reg_table_init(void);
 
+bool lock_all_vcpus(struct kvm *kvm);
+void unlock_all_vcpus(struct kvm *kvm);
+
 /* MMIO helpers */
 void kvm_mmio_write_buf(void *buf, unsigned int len, unsigned long data);
 unsigned long kvm_mmio_read_buf(const void *buf, unsigned int len);
@@ -885,6 +899,8 @@ int kvm_arm_vcpu_arch_has_attr(struct kvm_vcpu *vcpu,
 
 long kvm_vm_ioctl_mte_copy_tags(struct kvm *kvm,
 				struct kvm_arm_copy_mte_tags *copy_tags);
+int kvm_vm_ioctl_set_counter_offset(struct kvm *kvm,
+				    struct kvm_arm_counter_offset *offset);
 
 /* Guest/host FPSIMD coordination helpers */
 int kvm_arch_vcpu_run_map_fp(struct kvm_vcpu *vcpu);

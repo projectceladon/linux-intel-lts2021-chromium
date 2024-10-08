@@ -11,16 +11,13 @@
  * more details.
  */
 
-#include <linux/version.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_atomic_helper.h>
 #include "evdi_drm_drv.h"
 
-#if KERNEL_VERSION(5, 1, 0) <= LINUX_VERSION_CODE || defined(EL8)
 #include <drm/drm_probe_helper.h>
-#endif
 
 /*
  * dummy connector to just get EDID,
@@ -36,19 +33,11 @@ static int evdi_get_modes(struct drm_connector *connector)
 	edid = (struct edid *)evdi_painter_get_edid_copy(evdi);
 
 	if (!edid) {
-#if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE || defined(EL8)
 		drm_connector_update_edid_property(connector, NULL);
-#else
-		drm_mode_connector_update_edid_property(connector, NULL);
-#endif
 		return 0;
 	}
 
-#if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE || defined(EL8)
 	ret = drm_connector_update_edid_property(connector, edid);
-#else
-	ret = drm_mode_connector_update_edid_property(connector, edid);
-#endif
 
 	if (ret) {
 		EVDI_ERROR("Failed to set edid property! error: %d", ret);
@@ -62,6 +51,21 @@ err:
 	return ret;
 }
 
+bool is_lowest_frequency_mode_of_given_resolution(
+	struct drm_connector *connector, struct drm_display_mode *mode)
+{
+	struct drm_display_mode *modeptr;
+
+	list_for_each_entry(modeptr, &(connector->modes), head) {
+		if (modeptr->hdisplay == mode->hdisplay &&
+			modeptr->vdisplay == mode->vdisplay &&
+			drm_mode_vrefresh(modeptr) < drm_mode_vrefresh(mode)) {
+			return false;
+		}
+	}
+	return true;
+}
+
 static enum drm_mode_status evdi_mode_valid(struct drm_connector *connector,
 					    struct drm_display_mode *mode)
 {
@@ -72,9 +76,9 @@ static enum drm_mode_status evdi_mode_valid(struct drm_connector *connector,
 	if (evdi->pixel_per_second_limit == 0)
 		return MODE_OK;
 
-	if (area_limit > evdi->pixel_area_limit ||
-	    mode_limit > evdi->pixel_per_second_limit) {
-		EVDI_WARN("(card%d) Mode %dx%d@%d rejected\n",
+	if (area_limit > evdi->pixel_area_limit) {
+		EVDI_WARN(
+			"(card%d) Mode %dx%d@%d rejected. Reason: mode area too big\n",
 			evdi->dev_index,
 			mode->hdisplay,
 			mode->vdisplay,
@@ -82,7 +86,27 @@ static enum drm_mode_status evdi_mode_valid(struct drm_connector *connector,
 		return MODE_BAD;
 	}
 
-	return MODE_OK;
+	if (mode_limit <= evdi->pixel_per_second_limit)
+		return MODE_OK;
+
+	if (is_lowest_frequency_mode_of_given_resolution(connector, mode)) {
+		EVDI_WARN(
+			"(card%d) Mode exceeds maximal frame rate for the device. Mode %dx%d@%d may have a limited output frame rate",
+			evdi->dev_index,
+			mode->hdisplay,
+			mode->vdisplay,
+			drm_mode_vrefresh(mode));
+		return MODE_OK;
+	}
+
+	EVDI_WARN(
+		"(card%d) Mode %dx%d@%d rejected. Reason: mode pixel clock too high\n",
+		evdi->dev_index,
+		mode->hdisplay,
+		mode->vdisplay,
+		drm_mode_vrefresh(mode));
+
+	return MODE_BAD;
 }
 
 static enum drm_connector_status
@@ -110,7 +134,6 @@ static void evdi_connector_destroy(struct drm_connector *connector)
 
 static struct drm_encoder *evdi_best_encoder(struct drm_connector *connector)
 {
-#if KERNEL_VERSION(5, 5, 0) <= LINUX_VERSION_CODE || defined(EL8)
 	struct drm_encoder *encoder;
 
 	drm_connector_for_each_possible_encoder(connector, encoder) {
@@ -118,11 +141,6 @@ static struct drm_encoder *evdi_best_encoder(struct drm_connector *connector)
 	}
 
 	return NULL;
-#else
-	return drm_encoder_find(connector->dev,
-				NULL,
-				connector->encoder_ids[0]);
-#endif
 }
 
 static struct drm_connector_helper_funcs evdi_connector_helper_funcs = {
@@ -159,10 +177,6 @@ int evdi_connector_init(struct drm_device *dev, struct drm_encoder *encoder)
 
 	evdi->conn = connector;
 
-#if KERNEL_VERSION(4, 19, 0) <= LINUX_VERSION_CODE  || defined(EL8)
 	drm_connector_attach_encoder(connector, encoder);
-#else
-	drm_mode_connector_attach_encoder(connector, encoder);
-#endif
 	return 0;
 }

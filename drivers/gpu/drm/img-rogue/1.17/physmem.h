@@ -75,6 +75,9 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                                         allocation is to be done
 @Input          pszSymbolicAddress    Symbolic name of the allocation
 @Input          phHandlePtr           PDUMP handle to the allocation
+@Input          uiPid                 PID of the process owning the allocation
+                                        (or PVR_SYS_ALLOC_PID if the allocation
+                                        belongs to the driver)
 @Output         hMemHandle            Handle to the allocated memory
 @Output         psDevPhysAddr         Device Physical address of allocated
                                         page
@@ -91,6 +94,7 @@ DevPhysMemAlloc(PVRSRV_DEVICE_NODE *psDevNode,
                 const IMG_CHAR *pszSymbolicAddress,
                 IMG_HANDLE *phHandlePtr,
 #endif
+                IMG_PID uiPid,
                 IMG_HANDLE hMemHandle,
                 IMG_DEV_PHYADDR *psDevPhysAddr);
 
@@ -317,5 +321,27 @@ PVRSRVPhysHeapGetMemInfoPkdKM(CONNECTION_DATA *psConnection,
 			   IMG_UINT32 ui32PhysHeapCount,
 			   PVRSRV_PHYS_HEAP *paePhysHeapID,
 			   PHYS_HEAP_MEM_STATS_PKD *paPhysHeapMemStats);
+
+/*************************************************************************/ /*!
+@Function       PhysMemValidateParams
+@Description    Checks the PMR creation parameters and adjusts them
+                if possible and necessary
+@Input          ui32NumPhysChunks      Number of physical chunks.
+@Input          ui32NumVirtChunks      Number of virtual chunks.
+@Input          uiFlags                Allocation flags.
+@Inout          puiLog2AllocPageSize   Log2 of allocation page size.
+                                       May be adjusted.
+@Inout          puiSize                Size of the allocation.
+                                       May be adjusted.
+@Inout          puiChunkSize           Size of a backed or unbacked chunk
+@Return         PVRSRV_OK if parameters are valid.
+*/ /**************************************************************************/
+PVRSRV_ERROR
+PhysMemValidateParams(IMG_UINT32 ui32NumPhysChunks,
+                      IMG_UINT32 ui32NumVirtChunks,
+                      PVRSRV_MEMALLOCFLAGS_T uiFlags,
+                      IMG_UINT32 *puiLog2AllocPageSize,
+                      IMG_DEVMEM_SIZE_T *puiSize,
+                      PMR_SIZE_T *puiChunkSize);
 
 #endif /* SRVSRV_PHYSMEM_H */

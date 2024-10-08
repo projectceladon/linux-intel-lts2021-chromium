@@ -2441,4 +2441,11 @@ config ARCH_HAS_SYNC_CORE_BEFORE_USERMODE
 config ARCH_HAS_SYSCALL_WRAPPER
 	def_bool n
 
+config SCHED_EEVDF
+	bool "EEVDF cpu scheduler"
+	depends on !COMPILE_TEST
+	help
+	  Enable dynamic switching between EEVDF and CFS.
+	default y
+
 source "init/Kconfig.gki"

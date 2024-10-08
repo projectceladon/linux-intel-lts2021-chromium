@@ -37,7 +37,7 @@ static struct inode *ntfs_read_mft(struct inode *inode,
 	bool is_dir;
 	unsigned long ino = inode->i_ino;
 	u32 rp_fa = 0, asize, t32;
-	u16 roff, rsize, names = 0;
+	u16 roff, rsize, names = 0, links = 0;
 	const struct ATTR_FILE_NAME *fname = NULL;
 	const struct INDEX_ROOT *root;
 	struct REPARSE_DATA_BUFFER rp; // 0x18 bytes
@@ -81,7 +81,7 @@ static struct inode *ntfs_read_mft(struct inode *inode,
 			 le16_to_cpu(ref->seq), le16_to_cpu(rec->seq));
 		goto out;
 	} else if (!is_rec_inuse(rec)) {
-		err = -EINVAL;
+		err = -ESTALE;
 		ntfs_err(sb, "Inode r=%x is not in use!", (u32)ino);
 		goto out;
 	}
@@ -92,8 +92,10 @@ static struct inode *ntfs_read_mft(struct inode *inode,
 		goto out;
 	}
 
-	if (!is_rec_base(rec))
-		goto Ok;
+	if (!is_rec_base(rec)) {
+		err = -EINVAL;
+		goto out;
+	}
 
 	/* Record should contain $I30 root. */
 	is_dir = rec->flags & RECORD_FLAG_DIR;
@@ -188,11 +190,12 @@ next_attr:
 		    rsize < SIZEOF_ATTRIBUTE_FILENAME)
 			goto out;
 
+		names += 1;
 		fname = Add2Ptr(attr, roff);
 		if (fname->type == FILE_NAME_DOS)
 			goto next_attr;
 
-		names += 1;
+		links += 1;
 		if (name && name->len == fname->name_len &&
 		    !ntfs_cmp_names_cpu(name, (struct le_str *)&fname->name_len,
 					NULL, false))
@@ -400,7 +403,6 @@ end_enum:
 		goto out;
 
 	if (!is_match && name) {
-		/* Reuse rec as buffer for ascii name. */
 		err = -ENOENT;
 		goto out;
 	}
@@ -415,11 +417,12 @@ end_enum:
 
 	if (names != le16_to_cpu(rec->hard_links)) {
 		/* Correct minor error on the fly. Do not mark inode as dirty. */
+		ntfs_inode_warn(inode, "Correct links count -> %u.", names);
 		rec->hard_links = cpu_to_le16(names);
 		ni->mi.dirty = true;
 	}
 
-	set_nlink(inode, names);
+	set_nlink(inode, links);
 
 	if (S_ISDIR(mode)) {
 		ni->std_fa |= FILE_ATTRIBUTE_DIRECTORY;
@@ -472,7 +475,6 @@ end_enum:
 		inode->i_flags |= S_NOSEC;
 	}
 
-Ok:
 	if (ino == MFT_REC_MFT && !sb->s_root)
 		sbi->mft.ni = NULL;
 
@@ -525,6 +527,9 @@ struct inode *ntfs_iget5(struct super_block *sb, const struct MFT_REF *ref,
 		/* Inode overlaps? */
 		make_bad_inode(inode);
 	}
+
+	if (IS_ERR(inode) && name)
+		ntfs_set_state(sb->s_fs_info, NTFS_DIRTY_ERROR);
 
 	return inode;
 }
@@ -1460,7 +1465,7 @@ struct inode *ntfs_create_inode(struct user_namespace *mnt_userns,
 			attr->size = cpu_to_le32(SIZEOF_NONRESIDENT_EX + 8);
 			attr->name_off = SIZEOF_NONRESIDENT_EX_LE;
 			attr->flags = ATTR_FLAG_COMPRESSED;
-			attr->nres.c_unit = COMPRESSION_UNIT;
+			attr->nres.c_unit = NTFS_LZNT_CUNIT;
 			asize = SIZEOF_NONRESIDENT_EX + 8;
 		} else {
 			attr->size = cpu_to_le32(SIZEOF_NONRESIDENT + 8);
@@ -1647,10 +1652,8 @@ out6:
 		ntfs_remove_reparse(sbi, IO_REPARSE_TAG_SYMLINK, &new_de->ref);
 
 out5:
-	if (S_ISDIR(mode) || run_is_empty(&ni->file.run))
-		goto out4;
-
-	run_deallocate(sbi, &ni->file.run, false);
+	if (!S_ISDIR(mode))
+		run_deallocate(sbi, &ni->file.run, false);
 
 out4:
 	clear_rec_inuse(rec);

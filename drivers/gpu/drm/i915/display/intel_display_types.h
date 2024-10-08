@@ -43,7 +43,7 @@
 #include <drm/drm_rect.h>
 #include <drm/drm_vblank.h>
 #include <drm/drm_vblank_work.h>
-#include <drm/i915_mei_hdcp_interface.h>
+#include <drm/i915_hdcp_interface.h>
 #include <media/cec-notifier.h>
 
 #include "i915_vma.h"
@@ -59,6 +59,7 @@ struct __intel_global_objs_state;
 struct intel_ddi_buf_trans;
 struct intel_fbc;
 struct intel_connector;
+struct intel_tc_port;
 
 /*
  * Display related stuff
@@ -168,9 +169,6 @@ struct intel_encoder {
 	int (*compute_config_late)(struct intel_encoder *,
 				   struct intel_crtc_state *,
 				   struct drm_connector_state *);
-	void (*update_prepare)(struct intel_atomic_state *,
-			       struct intel_encoder *,
-			       struct intel_crtc *);
 	void (*pre_pll_enable)(struct intel_atomic_state *,
 			       struct intel_encoder *,
 			       const struct intel_crtc_state *,
@@ -183,9 +181,6 @@ struct intel_encoder {
 		       struct intel_encoder *,
 		       const struct intel_crtc_state *,
 		       const struct drm_connector_state *);
-	void (*update_complete)(struct intel_atomic_state *,
-				struct intel_encoder *,
-				struct intel_crtc *);
 	void (*disable)(struct intel_atomic_state *,
 			struct intel_encoder *,
 			const struct intel_crtc_state *,
@@ -493,15 +488,15 @@ struct intel_hdcp_shim {
 	enum hdcp_wired_protocol protocol;
 
 	/* Detects whether sink is HDCP2.2 capable */
-	int (*hdcp_2_2_capable)(struct intel_digital_port *dig_port,
+	int (*hdcp_2_2_capable)(struct intel_connector *connector,
 				bool *capable);
 
 	/* Write HDCP2.2 messages */
-	int (*write_2_2_msg)(struct intel_digital_port *dig_port,
+	int (*write_2_2_msg)(struct intel_connector *connector,
 			     void *buf, size_t size);
 
 	/* Read HDCP2.2 messages */
-	int (*read_2_2_msg)(struct intel_digital_port *dig_port,
+	int (*read_2_2_msg)(struct intel_connector *connector,
 			    u8 msg_id, void *buf, size_t size);
 
 	/*
@@ -509,7 +504,7 @@ struct intel_hdcp_shim {
 	 * type to Receivers. In DP HDCP2.2 Stream type is one of the input to
 	 * the HDCP2.2 Cipher for En/De-Cryption. Not applicable for HDMI.
 	 */
-	int (*config_stream_type)(struct intel_digital_port *dig_port,
+	int (*config_stream_type)(struct intel_connector *connector,
 				  bool is_repeater, u8 type);
 
 	/* Enable/Disable HDCP 2.2 stream encryption on DP MST Transport Link */
@@ -976,6 +971,15 @@ struct intel_mpllb_state {
 	u32 mpllb_sscstep;
 };
 
+/* Used by dp and fdi links */
+struct intel_link_m_n {
+	u32 tu;
+	u32 data_m;
+	u32 data_n;
+	u32 link_m;
+	u32 link_n;
+};
+
 struct intel_crtc_state {
 	/*
 	 * uapi (drm) state. This is the software state shown to userspace.
@@ -1030,6 +1034,8 @@ struct intel_crtc_state {
 
 	unsigned fb_bits; /* framebuffers to flip */
 	bool update_pipe; /* can a fast modeset be performed? */
+	bool update_m_n; /* update M/N seamlessly during fastset? */
+	bool update_lrr; /* update TRANS_VTOTAL/etc. during fastset? */
 	bool disable_cxsr;
 	bool update_wm_pre, update_wm_post; /* watermarks are updated */
 	bool fifo_changed; /* FIFO split is changed */
@@ -1141,7 +1147,6 @@ struct intel_crtc_state {
 	/* m2_n2 for eDP downclock */
 	struct intel_link_m_n dp_m2_n2;
 	bool has_drrs;
-	bool seamless_m_n;
 
 	/* PSR is supported but might not be enabled due the lack of enabled planes */
 	bool has_psr;
@@ -1309,7 +1314,7 @@ struct intel_crtc_state {
 
 	/* Variable Refresh Rate state */
 	struct {
-		bool enable;
+		bool enable, in_range;
 		u8 pipeline_full;
 		u16 flipline, vmin, vmax, guardband;
 	} vrr;
@@ -1373,6 +1378,7 @@ struct intel_crtc {
 	u16 vmax_vblank_start;
 
 	struct intel_display_power_domain_set enabled_power_domains;
+	struct intel_display_power_domain_set hw_readout_power_domains;
 	struct intel_overlay *overlay;
 
 	struct intel_crtc_state *config;
@@ -1774,17 +1780,7 @@ struct intel_digital_port {
 	intel_wakeref_t ddi_io_wakeref;
 	intel_wakeref_t aux_wakeref;
 
-	struct mutex tc_lock;	/* protects the TypeC port mode */
-	intel_wakeref_t tc_lock_wakeref;
-	enum intel_display_power_domain tc_lock_power_domain;
-	struct delayed_work tc_disconnect_phy_work;
-	int tc_link_refcount;
-	bool tc_legacy_port:1;
-	char tc_port_name[8];
-	enum tc_port_mode tc_mode;
-	enum tc_port_mode tc_init_mode;
-	enum phy_fia tc_phy_fia;
-	u8 tc_phy_fia_idx;
+	struct intel_tc_port *tc;
 
 	/* protects num_hdcp_streams reference count, hdcp_port_data and hdcp_auth_status */
 	struct mutex hdcp_mutex;
@@ -1820,51 +1816,6 @@ struct intel_dp_mst_encoder {
 	struct intel_digital_port *primary;
 	struct intel_connector *connector;
 };
-
-static inline enum dpio_channel
-vlv_dig_port_to_channel(struct intel_digital_port *dig_port)
-{
-	switch (dig_port->base.port) {
-	default:
-		MISSING_CASE(dig_port->base.port);
-		fallthrough;
-	case PORT_B:
-	case PORT_D:
-		return DPIO_CH0;
-	case PORT_C:
-		return DPIO_CH1;
-	}
-}
-
-static inline enum dpio_phy
-vlv_dig_port_to_phy(struct intel_digital_port *dig_port)
-{
-	switch (dig_port->base.port) {
-	default:
-		MISSING_CASE(dig_port->base.port);
-		fallthrough;
-	case PORT_B:
-	case PORT_C:
-		return DPIO_PHY0;
-	case PORT_D:
-		return DPIO_PHY1;
-	}
-}
-
-static inline enum dpio_channel
-vlv_pipe_to_channel(enum pipe pipe)
-{
-	switch (pipe) {
-	default:
-		MISSING_CASE(pipe);
-		fallthrough;
-	case PIPE_A:
-	case PIPE_C:
-		return DPIO_CH0;
-	case PIPE_B:
-		return DPIO_CH1;
-	}
-}
 
 struct intel_load_detect_pipe {
 	struct drm_atomic_state *restore_state;

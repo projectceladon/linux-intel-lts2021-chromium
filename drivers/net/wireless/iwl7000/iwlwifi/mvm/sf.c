@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2013-2014, 2018-2019, 2022 Intel Corporation
+ * Copyright (C) 2013-2014, 2018-2019, 2022-2024 Intel Corporation
  * Copyright (C) 2013-2014 Intel Mobile Communications GmbH
  */
 #include "mvm.h"
@@ -25,7 +25,7 @@ static void iwl_mvm_bound_iface_iterator(void *_data, u8 *mac,
 
 	if (vif == data->ignore_vif || !mvmvif->deflink.phy_ctxt ||
 	    vif->type == NL80211_IFTYPE_P2P_DEVICE ||
-	    ieee80211_viftype_nan(vif->type))
+	    vif->type == NL80211_IFTYPE_NAN)
 		return;
 
 	data->num_active_macs++;
@@ -120,7 +120,7 @@ static void iwl_mvm_fill_sf_command(struct iwl_mvm *mvm,
 
 			if (link_sta->ht_cap.ht_supported ||
 			    link_sta->vht_cap.vht_supported ||
-			    cfg_eht_cap_has_eht(link_sta) ||
+			    false/* no EHT */ ||
 			    link_sta->he_cap.has_he) {
 				is_legacy = false;
 				max_rx_nss = max(max_rx_nss, link_sta->rx_nss);
@@ -181,9 +181,6 @@ static int iwl_mvm_sf_config(struct iwl_mvm *mvm, struct ieee80211_sta *sta,
 	};
 	int ret = 0;
 
-	if (mvm->cfg->disable_dummy_notification)
-		sf_cmd.state |= cpu_to_le32(SF_CFG_DUMMY_NOTIF_OFF);
-
 	/*
 	 * If an associated AP sta changed its antenna configuration, the state
 	 * will remain FULL_ON but SF parameters need to be reconsidered.
@@ -236,13 +233,16 @@ int iwl_mvm_sf_update(struct iwl_mvm *mvm, struct ieee80211_vif *changed_vif,
 	};
 	struct ieee80211_sta *sta = NULL;
 
+	if (fw_has_api(&mvm->fw->ucode_capa,
+		       IWL_UCODE_TLV_API_SMART_FIFO_OFFLOAD))
+		return 0;
 	/*
 	 * Ignore the call if we are in HW Restart flow, or if the handled
 	 * vif is a p2p device.
 	 */
 	if (test_bit(IWL_MVM_STATUS_IN_HW_RESTART, &mvm->status) ||
 	    (changed_vif && (changed_vif->type == NL80211_IFTYPE_P2P_DEVICE ||
-			     ieee80211_viftype_nan(changed_vif->type))))
+			     changed_vif->type == NL80211_IFTYPE_NAN)))
 		return 0;
 
 	ieee80211_iterate_active_interfaces_atomic(mvm->hw,

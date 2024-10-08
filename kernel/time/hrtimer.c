@@ -43,6 +43,7 @@
 #include <linux/compat.h>
 
 #include <linux/uaccess.h>
+#include <linux/slab.h>
 
 #include <trace/events/timer.h>
 
@@ -736,6 +737,9 @@ static void hrtimer_switch_to_hres(void)
 {
 	struct hrtimer_cpu_base *base = this_cpu_ptr(&hrtimer_bases);
 
+	if (__hrtimer_hres_active(base))
+		return;
+
 	if (tick_init_highres()) {
 		pr_warn("Could not switch to high resolution mode on CPU %u\n",
 			base->cpu);
@@ -980,6 +984,23 @@ out_timerfd:
 	timerfd_clock_was_set();
 }
 
+#if defined CONFIG_HIGH_RES_TIMERS && CONFIG_HZ >= 1000
+/*
+ * Switch to low resolution mode
+ */
+void hrtimer_switch_to_lres(void)
+{
+	struct hrtimer_cpu_base *base = this_cpu_ptr(&hrtimer_bases);
+
+	if (!__hrtimer_hres_active(base))
+		return;
+
+	tick_nohz_hres_to_lres();
+	base->hres_active = 0;
+	hrtimer_resolution = LOW_RES_NSEC;
+}
+#endif
+
 static void clock_was_set_work(struct work_struct *work)
 {
 	clock_was_set(CLOCK_SET_WALL);
@@ -1082,6 +1103,7 @@ static int enqueue_hrtimer(struct hrtimer *timer,
 			   enum hrtimer_mode mode)
 {
 	debug_activate(timer, mode);
+	WARN_ON_ONCE(!base->cpu_base->online);
 
 	base->cpu_base->active_bases |= 1 << base->index;
 
@@ -1283,6 +1305,8 @@ void hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim,
 	struct hrtimer_clock_base *base;
 	unsigned long flags;
 
+	if (WARN_ON_ONCE(!timer->function))
+		return;
 	/*
 	 * Check whether the HRTIMER_MODE_SOFT bit and hrtimer.is_soft
 	 * match on CONFIG_PREEMPT_RT = n. With PREEMPT_RT check the hard
@@ -1785,7 +1809,15 @@ void hrtimer_interrupt(struct clock_event_device *dev)
 	unsigned long flags;
 	int retries = 0;
 
-	BUG_ON(!cpu_base->hres_active);
+	/*
+	 * TODO: This is a BUG_ON() in upstream, but is required
+	 * to prevent a crash when transitioning from high to low res.
+	 * We need to find a way to keep the BUG_ON in highres mode.
+	 * UPDATE (6/2023): crash cannot be reproduced with recent changes.
+	 * Will keep it just in case, but will drop for upstream.
+	 */
+	if (!cpu_base->hres_active)
+		return;
 	cpu_base->nr_events++;
 	dev->next_event = KTIME_MAX;
 
@@ -2180,6 +2212,7 @@ int hrtimers_prepare_cpu(unsigned int cpu)
 	cpu_base->softirq_next_timer = NULL;
 	cpu_base->expires_next = KTIME_MAX;
 	cpu_base->softirq_expires_next = KTIME_MAX;
+	cpu_base->online = 1;
 	hrtimer_cpu_base_init_expiry_lock(cpu_base);
 	return 0;
 }
@@ -2216,29 +2249,22 @@ static void migrate_hrtimer_list(struct hrtimer_clock_base *old_base,
 	}
 }
 
-int hrtimers_dead_cpu(unsigned int scpu)
+int hrtimers_cpu_dying(unsigned int dying_cpu)
 {
 	struct hrtimer_cpu_base *old_base, *new_base;
-	int i;
+	int i, ncpu = cpumask_first(cpu_active_mask);
 
-	BUG_ON(cpu_online(scpu));
-	tick_cancel_sched_timer(scpu);
+	tick_cancel_sched_timer(dying_cpu);
 
-	/*
-	 * this BH disable ensures that raise_softirq_irqoff() does
-	 * not wakeup ksoftirqd (and acquire the pi-lock) while
-	 * holding the cpu_base lock
-	 */
-	local_bh_disable();
-	local_irq_disable();
-	old_base = &per_cpu(hrtimer_bases, scpu);
-	new_base = this_cpu_ptr(&hrtimer_bases);
+	old_base = this_cpu_ptr(&hrtimer_bases);
+	new_base = &per_cpu(hrtimer_bases, ncpu);
+
 	/*
 	 * The caller is globally serialized and nobody else
 	 * takes two locks at once, deadlock is not possible.
 	 */
-	raw_spin_lock(&new_base->lock);
-	raw_spin_lock_nested(&old_base->lock, SINGLE_DEPTH_NESTING);
+	raw_spin_lock(&old_base->lock);
+	raw_spin_lock_nested(&new_base->lock, SINGLE_DEPTH_NESTING);
 
 	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++) {
 		migrate_hrtimer_list(&old_base->clock_base[i],
@@ -2249,30 +2275,80 @@ int hrtimers_dead_cpu(unsigned int scpu)
 	 * The migration might have changed the first expiring softirq
 	 * timer on this CPU. Update it.
 	 */
-	hrtimer_update_softirq_timer(new_base, false);
+	__hrtimer_get_next_event(new_base, HRTIMER_ACTIVE_SOFT);
+	/* Tell the other CPU to retrigger the next event */
+	smp_call_function_single(ncpu, retrigger_next_event, NULL, 0);
 
-	raw_spin_unlock(&old_base->lock);
 	raw_spin_unlock(&new_base->lock);
+	old_base->online = 0;
+	raw_spin_unlock(&old_base->lock);
 
-	/* Check, if we got expired work to do */
-	__hrtimer_peek_ahead_timers();
-	local_irq_enable();
-	local_bh_enable();
 	return 0;
 }
 
 #endif /* CONFIG_HOTPLUG_CPU */
 
+#if defined CONFIG_HIGH_RES_TIMERS && CONFIG_HZ >= 1000
+
+static void hrtimer_smp_call(void *info)
+{
+	bool hres = *((bool *)info);
+
+	if (!hres)
+		hrtimer_switch_to_lres();
+	else
+		hrtimer_switch_to_hres();
+}
+
+static int hrtimer_hres_handler(struct ctl_table *table, int write,
+			      void *buffer, size_t *lenp, loff_t *ppos)
+{
+	bool hres;
+
+	if (!write)
+		return proc_dointvec_minmax(table, write, buffer, lenp, ppos);
+
+	hres = ((char *)buffer)[0] != '0';
+	if (hrtimer_hres_enabled == hres)
+		return 0;
+
+	pr_info("Trying to switch to %s res\n", hres ? "high" : "low");
+
+	on_each_cpu(hrtimer_smp_call, &hres, true);
+	hrtimer_hres_enabled = hres;
+	return 0;
+}
+
+static unsigned int zero;
+static unsigned int one = 1;
+static struct ctl_table timer_hres_sysctl[] = {
+	{
+		.procname	= "timer_highres",
+		.data		= &hrtimer_hres_enabled,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= hrtimer_hres_handler,
+		.extra1		= &zero,
+		.extra2		= &one,
+	},
+	{}
+};
+
+#endif /* CONFIG_HIGH_RES_TIMERS */
+
 void __init hrtimers_init(void)
 {
 	hrtimers_prepare_cpu(smp_processor_id());
 	open_softirq(HRTIMER_SOFTIRQ, hrtimer_run_softirq);
+#if defined CONFIG_HIGH_RES_TIMERS && CONFIG_HZ >= 1000
+	register_sysctl("kernel", timer_hres_sysctl);
+#endif
 }
 
 /**
  * schedule_hrtimeout_range_clock - sleep until timeout
  * @expires:	timeout value (ktime_t)
- * @delta:	slack in expires timeout (ktime_t)
+ * @delta:	slack in expires timeout (ktime_t) for SCHED_OTHER tasks
  * @mode:	timer mode
  * @clock_id:	timer clock to be used
  */
@@ -2299,6 +2375,13 @@ schedule_hrtimeout_range_clock(ktime_t *expires, u64 delta,
 		return -EINTR;
 	}
 
+	/*
+	 * Override any slack passed by the user if under
+	 * rt contraints.
+	 */
+	if (rt_task(current))
+		delta = 0;
+
 	hrtimer_init_sleeper_on_stack(&t, clock_id, mode);
 	hrtimer_set_expires_range_ns(&t.timer, *expires, delta);
 	hrtimer_sleeper_start_expires(&t, mode);
@@ -2318,7 +2401,7 @@ EXPORT_SYMBOL_GPL(schedule_hrtimeout_range_clock);
 /**
  * schedule_hrtimeout_range - sleep until timeout
  * @expires:	timeout value (ktime_t)
- * @delta:	slack in expires timeout (ktime_t)
+ * @delta:	slack in expires timeout (ktime_t) for SCHED_OTHER tasks
  * @mode:	timer mode
  *
  * Make the current task sleep until the given expiry time has
@@ -2326,7 +2409,8 @@ EXPORT_SYMBOL_GPL(schedule_hrtimeout_range_clock);
  * the current task state has been set (see set_current_state()).
  *
  * The @delta argument gives the kernel the freedom to schedule the
- * actual wakeup to a time that is both power and performance friendly.
+ * actual wakeup to a time that is both power and performance friendly
+ * for regular (non RT/DL) tasks.
  * The kernel give the normal best effort behavior for "@expires+@delta",
  * but may decide to fire the timer earlier, but no earlier than @expires.
  *

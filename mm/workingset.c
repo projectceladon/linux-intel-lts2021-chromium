@@ -260,6 +260,8 @@ static void lru_gen_refault(struct page *page, void *shadow)
 	bool workingset;
 	unsigned long token;
 	unsigned long min_seq;
+	unsigned long opposite_min_seq;
+	unsigned long victim_seq;
 	struct lruvec *lruvec;
 	struct lru_gen_page *lrugen;
 	struct mem_cgroup *memcg;
@@ -284,6 +286,14 @@ static void lru_gen_refault(struct page *page, void *shadow)
 	token >>= LRU_REFS_WIDTH;
 	lruvec = mem_cgroup_lruvec(memcg, pgdat);
 	lrugen = &lruvec->lrugen;
+
+	opposite_min_seq = READ_ONCE(lrugen->min_seq[!type]);
+	hist = lru_hist_from_seq(opposite_min_seq);
+	victim_seq = READ_ONCE(lrugen->victim_seq[hist][!type]);
+
+	if ((token >> LRU_REFS_WIDTH) >= (victim_seq & (EVICTION_MASK >> LRU_REFS_WIDTH)))
+		atomic_long_add(delta, &lrugen->refaulted_victims[hist][!type]);
+
 	min_seq = READ_ONCE(lrugen->min_seq[type]);
 	if (token != (min_seq & (EVICTION_MASK >> LRU_REFS_WIDTH)))
 		goto unlock;

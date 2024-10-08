@@ -203,7 +203,7 @@ static int parse_entry(char *str, struct trace_event_call *call, void **pentry)
 		return -ENOMEM;
 
 	tracing_generic_entry_update(entry, call->event.type,
-				     tracing_gen_ctx());
+				     0, tracing_gen_ctx());
 
 	while ((len = parse_field(str, call, &field, &val)) > 0) {
 		if (is_function_field(field))
@@ -292,7 +292,7 @@ event_inject_write(struct file *filp, const char __user *ubuf, size_t cnt,
 	strim(buf);
 
 	mutex_lock(&event_mutex);
-	file = event_file_data(filp);
+	file = event_file_file(filp);
 	if (file) {
 		call = file->event_call;
 		size = parse_entry(buf, call, &entry);
@@ -321,7 +321,8 @@ event_inject_read(struct file *file, char __user *buf, size_t size,
 }
 
 const struct file_operations event_inject_fops = {
-	.open = tracing_open_generic,
+	.open = tracing_open_file_tr,
 	.read = event_inject_read,
 	.write = event_inject_write,
+	.release = tracing_release_file_tr,
 };

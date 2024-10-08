@@ -189,6 +189,7 @@ static int __init mem_sleep_default_setup(char *str)
 		if (mem_sleep_labels[state] &&
 		    !strcmp(str, mem_sleep_labels[state])) {
 			mem_sleep_default = state;
+			mem_sleep_current = state;
 			break;
 		}
 
@@ -590,6 +591,8 @@ static int enter_state(suspend_state_t state)
 	if (error)
 		goto Unlock;
 
+	freeze_dl_server();
+
 	if (suspend_test(TEST_FREEZER))
 		goto Finish;
 
@@ -600,6 +603,7 @@ static int enter_state(suspend_state_t state)
 	pm_restore_gfp_mask();
 
  Finish:
+	thaw_dl_server();
 	events_check_enabled = false;
 	pm_pr_dbg("Finishing wakeup.\n");
 	suspend_finish();
@@ -629,6 +633,7 @@ int pm_suspend(suspend_state_t state)
 		dpm_save_failed_errno(error);
 	} else {
 		suspend_stats.success++;
+		ktime_get_ts64(&suspend_stats.last_success_resume_time);
 	}
 	pr_info("suspend exit\n");
 	return error;

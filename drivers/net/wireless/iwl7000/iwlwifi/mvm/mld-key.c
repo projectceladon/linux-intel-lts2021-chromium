@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2022 - 2023 Intel Corporation
+ * Copyright (C) 2022 - 2024 Intel Corporation
  */
 #include <linux/kernel.h>
 #include <net/mac80211.h>
@@ -38,8 +38,7 @@ static u32 iwl_mvm_get_sec_sta_mask(struct iwl_mvm *mvm,
 	if (!sta && vif->type == NL80211_IFTYPE_STATION)
 		sta = mvmvif->ap_sta;
 
-	/*
-	 * During remove the STA was removed and the group keys come later
+	/* During remove the STA was removed and the group keys come later
 	 * (which sounds like a bad sequence, but remember that to mac80211 the
 	 * group keys have no sta pointer), so we don't have a STA now.
 	 * Since this happens for group keys only, just use the link_info as
@@ -63,11 +62,13 @@ u32 iwl_mvm_get_sec_flags(struct iwl_mvm *mvm,
 			  struct ieee80211_key_conf *keyconf)
 {
 	struct iwl_mvm_vif *mvmvif = iwl_mvm_vif_from_mac80211(vif);
+	bool pairwise = keyconf->flags & IEEE80211_KEY_FLAG_PAIRWISE;
+	bool igtk = keyconf->keyidx == 4 || keyconf->keyidx == 5;
 	u32 flags = 0;
 
 	lockdep_assert_held(&mvm->mutex);
 
-	if (!(keyconf->flags & IEEE80211_KEY_FLAG_PAIRWISE))
+	if (!pairwise)
 		flags |= IWL_SEC_KEY_FLAG_MCAST_KEY;
 
 	switch (keyconf->cipher) {
@@ -97,8 +98,27 @@ u32 iwl_mvm_get_sec_flags(struct iwl_mvm *mvm,
 	if (!sta && vif->type == NL80211_IFTYPE_STATION)
 		sta = mvmvif->ap_sta;
 
-	if (!IS_ERR_OR_NULL(sta) && sta->mfp)
+	/*
+	 * If we are installing an iGTK (in AP or STA mode), we need to tell
+	 * the firmware this key will en/decrypt MGMT frames.
+	 * Same goes if we are installing a pairwise key for an MFP station.
+	 * In case we're installing a groupwise key (which is not an iGTK),
+	 * then, we will not use this key for MGMT frames.
+	 */
+	if ((!IS_ERR_OR_NULL(sta) && sta->mfp && pairwise) || igtk)
 		flags |= IWL_SEC_KEY_FLAG_MFP;
+
+	if (keyconf->flags & IEEE80211_KEY_FLAG_SPP_AMSDU)
+		flags |= IWL_SEC_KEY_FLAG_SPP_AMSDU;
+
+#ifdef CPTCFG_IWLWIFI_SUPPORT_DEBUG_OVERRIDES
+	if (mvm->trans->dbg_cfg.MVM_SPP_AMSDU_ACTIVATE >= 0) {
+		if (mvm->trans->dbg_cfg.MVM_SPP_AMSDU_ACTIVATE)
+			flags |= IWL_SEC_KEY_FLAG_SPP_AMSDU;
+		else
+			flags &= ~IWL_SEC_KEY_FLAG_SPP_AMSDU;
+	}
+#endif
 
 	return flags;
 }
@@ -133,7 +153,7 @@ static void iwl_mvm_mld_update_sta_key(struct ieee80211_hw *hw,
 	if (sta != data->sta || key->link_id >= 0)
 		return;
 
-	err = iwl_mvm_send_cmd_pdu(mvm, cmd_id, CMD_ASYNC, sizeof(cmd), &cmd);
+	err = iwl_mvm_send_cmd_pdu(mvm, cmd_id, 0, sizeof(cmd), &cmd);
 
 	if (err)
 		data->err = err;
@@ -151,8 +171,8 @@ int iwl_mvm_mld_update_sta_keys(struct iwl_mvm *mvm,
 		.new_sta_mask = new_sta_mask,
 	};
 
-	ieee80211_iter_keys_rcu(mvm->hw, vif, iwl_mvm_mld_update_sta_key,
-				&data);
+	ieee80211_iter_keys(mvm->hw, vif, iwl_mvm_mld_update_sta_key,
+			    &data);
 	return data.err;
 }
 
@@ -273,8 +293,7 @@ int iwl_mvm_sec_key_add(struct iwl_mvm *mvm,
 	if (mvm_link)
 		mvm_link->igtk = keyconf;
 
-	/*
-	 * We don't really need this, but need it to be not invalid,
+	/* We don't really need this, but need it to be not invalid,
 	 * and if we switch links multiple times it might go to be
 	 * invalid when removed.
 	 */
@@ -332,6 +351,21 @@ static int _iwl_mvm_sec_key_del(struct iwl_mvm *mvm,
 	return ret;
 }
 
+int iwl_mvm_sec_key_del_pasn(struct iwl_mvm *mvm,
+			     struct ieee80211_vif *vif,
+			     u32 sta_mask,
+			     struct ieee80211_key_conf *keyconf)
+{
+	u32 key_flags = iwl_mvm_get_sec_flags(mvm, vif, NULL, keyconf) |
+		IWL_SEC_KEY_FLAG_MFP;
+
+	if (WARN_ON(!sta_mask))
+		return -EINVAL;
+
+	return  __iwl_mvm_sec_key_del(mvm, sta_mask, key_flags, keyconf->keyidx,
+				      0);
+}
+
 int iwl_mvm_sec_key_del(struct iwl_mvm *mvm,
 			struct ieee80211_vif *vif,
 			struct ieee80211_sta *sta,
@@ -377,7 +411,7 @@ void iwl_mvm_sec_key_remove_ap(struct iwl_mvm *mvm,
 	if (!sec_key_ver)
 		return;
 
-	ieee80211_iter_keys_rcu(mvm->hw, vif,
-				iwl_mvm_sec_key_remove_ap_iter,
-				(void *)(uintptr_t)link_id);
+	ieee80211_iter_keys(mvm->hw, vif,
+			    iwl_mvm_sec_key_remove_ap_iter,
+			    (void *)(uintptr_t)link_id);
 }

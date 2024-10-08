@@ -12,7 +12,6 @@
 
 #include "iwl-modparams.h"
 
-
 static inline bool iwl_have_debug_level(u32 level)
 {
 #ifdef CPTCFG_IWLWIFI_DEBUG

@@ -175,7 +175,7 @@ struct cros_ec_device {
 	bool host_sleep_v1;
 	struct blocking_notifier_head event_notifier;
 
-	struct ec_response_get_next_event_v1 event_data;
+	struct ec_response_get_next_event_v3 event_data;
 	int event_size;
 	u32 host_event_wake_mask;
 	u32 last_resume_result;
@@ -248,7 +248,7 @@ bool cros_ec_check_features(struct cros_ec_dev *ec, int feature);
 int cros_ec_get_sensor_count(struct cros_ec_dev *ec);
 
 int cros_ec_cmd(struct cros_ec_device *ec_dev, unsigned int version, int command, void *outdata,
-		    int outsize, void *indata, int insize);
+		    size_t outsize, void *indata, size_t insize);
 
 /**
  * cros_ec_get_time_ns() - Return time in ns.

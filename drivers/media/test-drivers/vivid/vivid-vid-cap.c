@@ -80,8 +80,8 @@ static const struct v4l2_fract webcam_intervals[] = {
 #define IVAL_COUNT_1080P 9 /* 1080p and up is limited to 30 fps */
 #define IVAL_COUNT_2160P 7 /* 2160p and up is limited to 15 fps */
 
-static inline unsigned webcam_ival_count(const struct vivid_dev *dev,
-					 unsigned frmsize_idx)
+static inline unsigned int webcam_ival_count(const struct vivid_dev *dev,
+					     unsigned int frmsize_idx)
 {
 	if (webcam_sizes[frmsize_idx].height >= 2160)
 		return IVAL_COUNT_2160P;
@@ -130,8 +130,9 @@ static int vid_cap_queue_setup(struct vb2_queue *vq,
 		if (*nplanes != buffers)
 			return -EINVAL;
 		for (p = 0; p < buffers; p++) {
-			if (sizes[p] < tpg_g_line_width(&dev->tpg, p) * h +
-						dev->fmt_cap->data_offset[p])
+			if (sizes[p] < tpg_g_line_width(&dev->tpg, p) * h /
+					dev->fmt_cap->vdownsampling[p] +
+					dev->fmt_cap->data_offset[p])
 				return -EINVAL;
 		}
 	} else {
@@ -398,6 +399,7 @@ static enum tpg_pixel_aspect vivid_get_pixel_aspect(const struct vivid_dev *dev)
 void vivid_update_format_cap(struct vivid_dev *dev, bool keep_controls)
 {
 	struct v4l2_bt_timings *bt = &dev->dv_timings_cap[dev->input].bt;
+	u32 dims[V4L2_CTRL_MAX_DIMS] = {};
 	unsigned size;
 	u64 pixelclock;
 
@@ -482,6 +484,17 @@ void vivid_update_format_cap(struct vivid_dev *dev, bool keep_controls)
 	tpg_s_video_aspect(&dev->tpg, vivid_get_video_aspect(dev));
 	tpg_s_pixel_aspect(&dev->tpg, vivid_get_pixel_aspect(dev));
 	tpg_update_mv_step(&dev->tpg);
+
+	/*
+	 * We can be called from within s_ctrl, in that case we can't
+	 * modify controls. Luckily we don't need to in that case.
+	 */
+	if (keep_controls)
+		return;
+
+	dims[0] = roundup(dev->src_rect.width, PIXEL_ARRAY_DIV);
+	dims[1] = roundup(dev->src_rect.height, PIXEL_ARRAY_DIV);
+	v4l2_ctrl_modify_dimensions(dev->pixel_array, dims);
 }
 
 /* Map the field to something that is valid for the current input */
@@ -778,7 +791,7 @@ int vivid_s_fmt_vid_cap(struct file *file, void *priv,
 			compose->height /= factor;
 		}
 	} else if (vivid_is_webcam(dev)) {
-		unsigned ival_sz = webcam_ival_count(dev, dev->webcam_size_idx);
+		unsigned int ival_sz = webcam_ival_count(dev, dev->webcam_size_idx);
 
 		/* Guaranteed to be a match */
 		for (i = 0; i < ARRAY_SIZE(webcam_sizes); i++)
@@ -1816,8 +1829,10 @@ int vidioc_s_edid(struct file *file, void *_fh,
 		return -EINVAL;
 	if (edid->blocks == 0) {
 		dev->edid_blocks = 0;
-		v4l2_ctrl_s_ctrl(dev->ctrl_tx_edid_present, 0);
-		v4l2_ctrl_s_ctrl(dev->ctrl_tx_hotplug, 0);
+		if (dev->num_outputs) {
+			v4l2_ctrl_s_ctrl(dev->ctrl_tx_edid_present, 0);
+			v4l2_ctrl_s_ctrl(dev->ctrl_tx_hotplug, 0);
+		}
 		phys_addr = CEC_PHYS_ADDR_INVALID;
 		goto set_phys_addr;
 	}
@@ -1841,8 +1856,10 @@ int vidioc_s_edid(struct file *file, void *_fh,
 			display_present |=
 				dev->display_present[i] << j++;
 
-	v4l2_ctrl_s_ctrl(dev->ctrl_tx_edid_present, display_present);
-	v4l2_ctrl_s_ctrl(dev->ctrl_tx_hotplug, display_present);
+	if (dev->num_outputs) {
+		v4l2_ctrl_s_ctrl(dev->ctrl_tx_edid_present, display_present);
+		v4l2_ctrl_s_ctrl(dev->ctrl_tx_hotplug, display_present);
+	}
 
 set_phys_addr:
 	/* TODO: a proper hotplug detect cycle should be emulated here */
@@ -1942,7 +1959,7 @@ int vivid_vid_cap_s_parm(struct file *file, void *priv,
 			  struct v4l2_streamparm *parm)
 {
 	struct vivid_dev *dev = video_drvdata(file);
-	unsigned ival_sz = webcam_ival_count(dev, dev->webcam_size_idx);
+	unsigned int ival_sz = webcam_ival_count(dev, dev->webcam_size_idx);
 	struct v4l2_fract tpf;
 	unsigned i;
 

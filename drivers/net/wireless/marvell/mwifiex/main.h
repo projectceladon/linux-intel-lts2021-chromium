@@ -43,6 +43,7 @@
 #include <linux/gfp.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
+#include <linux/kthread.h>
 #include <linux/of_gpio.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -914,8 +915,8 @@ struct mwifiex_adapter {
 	atomic_t tx_hw_pending;
 	struct workqueue_struct *workqueue;
 	struct work_struct main_work;
-	struct workqueue_struct *rx_workqueue;
-	struct work_struct rx_work;
+	struct kthread_worker *rx_thread;
+	struct kthread_work rx_work;
 	struct workqueue_struct *dfs_workqueue;
 	struct work_struct dfs_work;
 	bool rx_work_enabled;
@@ -1329,6 +1330,9 @@ mwifiex_get_priv_by_id(struct mwifiex_adapter *adapter,
 
 	for (i = 0; i < adapter->priv_num; i++) {
 		if (adapter->priv[i]) {
+			if (adapter->priv[i]->bss_mode == NL80211_IFTYPE_UNSPECIFIED)
+				continue;
+
 			if ((adapter->priv[i]->bss_num == bss_num) &&
 			    (adapter->priv[i]->bss_type == bss_type))
 				break;

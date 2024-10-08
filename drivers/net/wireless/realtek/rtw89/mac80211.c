@@ -155,6 +155,7 @@ static int rtw89_ops_add_interface(struct ieee80211_hw *hw,
 	rtwvif->phy_idx = RTW89_PHY_0;
 	rtwvif->sub_entity_idx = RTW89_SUB_ENTITY_0;
 	rtwvif->hit_rule = 0;
+	rtwvif->reg_6ghz_power = RTW89_REG_6GHZ_POWER_DFLT;
 	ether_addr_copy(rtwvif->mac_addr, vif->addr);
 	INIT_LIST_HEAD(&rtwvif->general_pkt_list);
 
@@ -229,6 +230,7 @@ static void rtw89_ops_configure_filter(struct ieee80211_hw *hw,
 				       u64 multicast)
 {
 	struct rtw89_dev *rtwdev = hw->priv;
+	u32 rx_fltr;
 
 	mutex_lock(&rtwdev->mutex);
 	rtw89_leave_ps_mode(rtwdev);
@@ -275,16 +277,29 @@ static void rtw89_ops_configure_filter(struct ieee80211_hw *hw,
 		}
 	}
 
+	rx_fltr = rtwdev->hal.rx_fltr;
+
+	/* mac80211 doesn't configure filter when HW scan, driver need to
+	 * set by itself. However, during P2P scan might have configure
+	 * filter to overwrite filter that HW scan needed, so we need to
+	 * check scan and append related filter
+	 */
+	if (rtwdev->scanning) {
+		rx_fltr &= ~B_AX_A_BCN_CHK_EN;
+		rx_fltr &= ~B_AX_A_BC;
+		rx_fltr &= ~B_AX_A_A1_MATCH;
+	}
+
 	rtw89_write32_mask(rtwdev,
 			   rtw89_mac_reg_by_idx(R_AX_RX_FLTR_OPT, RTW89_MAC_0),
 			   B_AX_RX_FLTR_CFG_MASK,
-			   rtwdev->hal.rx_fltr);
+			   rx_fltr);
 	if (!rtwdev->dbcc_en)
 		goto out;
 	rtw89_write32_mask(rtwdev,
 			   rtw89_mac_reg_by_idx(R_AX_RX_FLTR_OPT, RTW89_MAC_1),
 			   B_AX_RX_FLTR_CFG_MASK,
-			   rtwdev->hal.rx_fltr);
+			   rx_fltr);
 
 out:
 	mutex_unlock(&rtwdev->mutex);
@@ -458,8 +473,16 @@ static int rtw89_ops_start_ap(struct ieee80211_hw *hw, struct ieee80211_vif *vif
 {
 	struct rtw89_dev *rtwdev = hw->priv;
 	struct rtw89_vif *rtwvif = (struct rtw89_vif *)vif->drv_priv;
+	const struct rtw89_chan *chan;
 
 	mutex_lock(&rtwdev->mutex);
+
+	chan = rtw89_chan_get(rtwdev, rtwvif->sub_entity_idx);
+	if (chan->band_type == RTW89_BAND_6G) {
+		mutex_unlock(&rtwdev->mutex);
+		return -EOPNOTSUPP;
+	}
+
 	ether_addr_copy(rtwvif->bssid, vif->bss_conf.bssid);
 	rtw89_cam_bssid_changed(rtwdev, rtwvif);
 	rtw89_mac_port_update(rtwdev, rtwvif);

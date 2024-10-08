@@ -78,7 +78,6 @@ struct sched_domain_shared {
 	int		has_idle_cores;
 
 	ANDROID_VENDOR_DATA(1);
-	int		nr_idle_scan;
 };
 
 struct sched_domain {

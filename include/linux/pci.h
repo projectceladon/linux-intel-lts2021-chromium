@@ -461,9 +461,11 @@ struct pci_dev {
 	unsigned int	link_active_reporting:1;/* Device capable of reporting link active */
 	unsigned int	no_vf_scan:1;		/* Don't scan for VFs after IOV enablement */
 	unsigned int	no_command_memory:1;	/* No PCI_COMMAND_MEMORY */
+	unsigned int	rom_bar_overlap:1;	/* ROM BAR disable broken */
 	pci_dev_flags_t dev_flags;
 	atomic_t	enable_cnt;	/* pci_enable_device has been called */
 
+	spinlock_t	pcie_cap_lock;		/* Protects RMW ops in capability accessors */
 	u32		saved_config_space[16]; /* Config space saved at suspend time */
 	struct hlist_head saved_cap_space;
 	int		rom_attr_enabled;	/* Display of ROM attribute enabled? */
@@ -1212,10 +1214,39 @@ int pcie_capability_read_word(struct pci_dev *dev, int pos, u16 *val);
 int pcie_capability_read_dword(struct pci_dev *dev, int pos, u32 *val);
 int pcie_capability_write_word(struct pci_dev *dev, int pos, u16 val);
 int pcie_capability_write_dword(struct pci_dev *dev, int pos, u32 val);
-int pcie_capability_clear_and_set_word(struct pci_dev *dev, int pos,
-				       u16 clear, u16 set);
+int pcie_capability_clear_and_set_word_unlocked(struct pci_dev *dev, int pos,
+						u16 clear, u16 set);
+int pcie_capability_clear_and_set_word_locked(struct pci_dev *dev, int pos,
+					      u16 clear, u16 set);
 int pcie_capability_clear_and_set_dword(struct pci_dev *dev, int pos,
 					u32 clear, u32 set);
+
+/**
+ * pcie_capability_clear_and_set_word - RMW accessor for PCI Express Capability Registers
+ * @dev:	PCI device structure of the PCI Express device
+ * @pos:	PCI Express Capability Register
+ * @clear:	Clear bitmask
+ * @set:	Set bitmask
+ *
+ * Perform a Read-Modify-Write (RMW) operation using @clear and @set
+ * bitmasks on PCI Express Capability Register at @pos. Certain PCI Express
+ * Capability Registers are accessed concurrently in RMW fashion, hence
+ * require locking which is handled transparently to the caller.
+ */
+static inline int pcie_capability_clear_and_set_word(struct pci_dev *dev,
+						     int pos,
+						     u16 clear, u16 set)
+{
+	switch (pos) {
+	case PCI_EXP_LNKCTL:
+	case PCI_EXP_RTCTL:
+		return pcie_capability_clear_and_set_word_locked(dev, pos,
+								 clear, set);
+	default:
+		return pcie_capability_clear_and_set_word_unlocked(dev, pos,
+								   clear, set);
+	}
+}
 
 static inline int pcie_capability_set_word(struct pci_dev *dev, int pos,
 					   u16 set)
@@ -1816,6 +1847,7 @@ static inline struct pci_dev *pci_get_class(unsigned int class,
 #define pci_dev_put(dev)	do { } while (0)
 
 static inline void pci_set_master(struct pci_dev *dev) { }
+static inline void pci_clear_master(struct pci_dev *dev) { }
 static inline int pci_enable_device(struct pci_dev *dev) { return -EIO; }
 static inline void pci_disable_device(struct pci_dev *dev) { }
 static inline int pcim_enable_device(struct pci_dev *pdev) { return -EIO; }
@@ -2316,6 +2348,11 @@ static inline struct pci_dev *pcie_find_root_port(struct pci_dev *dev)
 	}
 
 	return NULL;
+}
+
+static inline bool pci_dev_is_disconnected(const struct pci_dev *dev)
+{
+	return dev->error_state == pci_channel_io_perm_failure;
 }
 
 void pci_request_acs(void);

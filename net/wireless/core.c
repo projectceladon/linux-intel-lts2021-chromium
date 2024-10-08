@@ -216,7 +216,9 @@ static void cfg80211_rfkill_poll(struct rfkill *rfkill, void *data)
 {
 	struct cfg80211_registered_device *rdev = data;
 
+	wiphy_lock(&rdev->wiphy);
 	rdev_rfkill_poll(rdev);
+	wiphy_unlock(&rdev->wiphy);
 }
 
 void cfg80211_stop_p2p_device(struct cfg80211_registered_device *rdev,
@@ -1153,10 +1155,6 @@ static void _cfg80211_unregister_wdev(struct wireless_dev *wdev,
 	kfree_sensitive(wdev->wext.keys);
 	wdev->wext.keys = NULL;
 #endif
-	/* only initialized if we have a netdev */
-	if (wdev->netdev)
-		flush_work(&wdev->disconnect_wk);
-
 	cfg80211_cqm_config_free(wdev);
 
 	/*
@@ -1418,6 +1416,8 @@ static int cfg80211_netdev_notifier_call(struct notifier_block *nb,
 		wiphy_lock(&rdev->wiphy);
 		cfg80211_leave(rdev, wdev);
 		wiphy_unlock(&rdev->wiphy);
+		/* since we just did cfg80211_leave() nothing to do there */
+		cancel_work_sync(&wdev->disconnect_wk);
 		break;
 	case NETDEV_DOWN:
 		wiphy_lock(&rdev->wiphy);

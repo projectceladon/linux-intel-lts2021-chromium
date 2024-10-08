@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 /*
- * Copyright (C) 2022 - 2023 Intel Corporation
+ * Copyright (C) 2022 - 2024 Intel Corporation
  */
 #include "mvm.h"
 
@@ -43,8 +43,7 @@ static void iwl_mvm_mld_mac_ctxt_cmd_common(struct iwl_mvm *mvm,
 	if (iwlwifi_mod_params.disable_11ax)
 		return;
 
-	/*
-	 * If we have MLO enabled, then the firmware needs to enable
+	/* If we have MLO enabled, then the firmware needs to enable
 	 * address translation for the station(s) we add. That depends
 	 * on having EHT enabled in firmware, which in turn depends on
 	 * mac80211 in the code below.
@@ -136,14 +135,17 @@ static int iwl_mvm_mld_mac_ctxt_cmd_sta(struct iwl_mvm *mvm,
 	}
 
 	cmd.client.assoc_id = cpu_to_le16(vif->cfg.aid);
-	esr_transition_timeout =
-		u16_get_bits(vif->cfg.eml_cap, IEEE80211_EML_CAP_TRANSITION_TIMEOUT);
+	if (ieee80211_vif_is_mld(vif)) {
+		esr_transition_timeout =
+			u16_get_bits(vif->cfg.eml_cap,
+				     IEEE80211_EML_CAP_TRANSITION_TIMEOUT);
 
-	cmd.client.esr_transition_timeout =
-		min_t(u16, IEEE80211_EML_CAP_TRANSITION_TIMEOUT_128TU,
-		      esr_transition_timeout);
-		u16_get_bits(vif->cfg.eml_cap, IEEE80211_EML_CAP_TRANSITION_TIMEOUT);
-	cmd.client.medium_sync_delay = cpu_to_le16(vif->cfg.eml_med_sync_delay);
+		cmd.client.esr_transition_timeout =
+			min_t(u16, IEEE80211_EML_CAP_TRANSITION_TIMEOUT_128TU,
+			      esr_transition_timeout);
+		cmd.client.medium_sync_delay =
+			cpu_to_le16(vif->cfg.eml_med_sync_delay);
+	}
 
 	if (vif->probe_req_reg && vif->cfg.assoc && vif->p2p)
 		cmd.filter_flags |= cpu_to_le32(MAC_CFG_FILTER_ACCEPT_PROBE_REQ);
@@ -166,7 +168,7 @@ static int iwl_mvm_mld_mac_ctxt_cmd_listener(struct iwl_mvm *mvm,
 	iwl_mvm_mld_mac_ctxt_cmd_common(mvm, vif, &cmd, action);
 
 	cmd.filter_flags = cpu_to_le32(MAC_CFG_FILTER_PROMISC |
-				       MAC_FILTER_IN_CONTROL_AND_MGMT |
+				       MAC_CFG_FILTER_ACCEPT_CONTROL_AND_MGMT |
 				       MAC_CFG_FILTER_ACCEPT_BEACON |
 				       MAC_CFG_FILTER_ACCEPT_PROBE_REQ |
 				       MAC_CFG_FILTER_ACCEPT_GRP);
@@ -204,8 +206,11 @@ static int iwl_mvm_mld_mac_ctxt_cmd_p2p_device(struct iwl_mvm *mvm,
 	cmd.p2p_dev.is_disc_extended =
 		iwl_mac_ctxt_p2p_dev_has_extended_disc(mvm, vif);
 
-	/* Override the filter flags to accept only probe requests */
-	cmd.filter_flags = cpu_to_le32(MAC_CFG_FILTER_ACCEPT_PROBE_REQ);
+	/* Override the filter flags to accept all management frames. This is
+	 * needed to support both P2P device discovery using probe requests and
+	 * P2P service discovery using action frames
+	 */
+	cmd.filter_flags = cpu_to_le32(MAC_CFG_FILTER_ACCEPT_CONTROL_AND_MGMT);
 
 	return iwl_mvm_mld_mac_ctxt_send_cmd(mvm, &cmd);
 }
@@ -258,7 +263,7 @@ int iwl_mvm_mld_mac_ctxt_add(struct iwl_mvm *mvm, struct ieee80211_vif *vif)
 	struct iwl_mvm_vif *mvmvif = iwl_mvm_vif_from_mac80211(vif);
 	int ret;
 
-	if (WARN_ON_ONCE(ieee80211_viftype_nan(vif->type)))
+	if (WARN_ON_ONCE(vif->type == NL80211_IFTYPE_NAN))
 		return -EOPNOTSUPP;
 
 	if (WARN_ONCE(mvmvif->uploaded, "Adding active MAC %pM/%d\n",
@@ -283,7 +288,7 @@ int iwl_mvm_mld_mac_ctxt_changed(struct iwl_mvm *mvm,
 {
 	struct iwl_mvm_vif *mvmvif = iwl_mvm_vif_from_mac80211(vif);
 
-	if (WARN_ON_ONCE(ieee80211_viftype_nan(vif->type)))
+	if (WARN_ON_ONCE(vif->type == NL80211_IFTYPE_NAN))
 		return -EOPNOTSUPP;
 
 	if (WARN_ONCE(!mvmvif->uploaded, "Changing inactive MAC %pM/%d\n",
@@ -303,7 +308,7 @@ int iwl_mvm_mld_mac_ctxt_remove(struct iwl_mvm *mvm, struct ieee80211_vif *vif)
 	};
 	int ret;
 
-	if (WARN_ON_ONCE(ieee80211_viftype_nan(vif->type)))
+	if (WARN_ON_ONCE(vif->type == NL80211_IFTYPE_NAN))
 		return -EOPNOTSUPP;
 
 	if (WARN_ONCE(!mvmvif->uploaded, "Removing inactive MAC %pM/%d\n",

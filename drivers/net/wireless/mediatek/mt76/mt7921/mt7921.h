@@ -26,11 +26,17 @@
 #define MT7921_TX_FWDL_RING_SIZE	128
 
 #define MT7921_RX_RING_SIZE		1536
-#define MT7921_RX_MCU_RING_SIZE		512
+#define MT7921_RX_MCU_RING_SIZE		8
+#define MT7921_RX_MCU_WA_RING_SIZE	512
 
 #define MT7921_DRV_OWN_RETRY_COUNT	10
 #define MT7921_MCU_INIT_RETRY_COUNT	10
 #define MT7921_WFSYS_INIT_RETRY_COUNT	2
+
+#define MT7921_FW_TAG_FEATURE		4
+#define MT7921_FW_CAP_CNM		BIT(7)
+
+#define MT7921_CHIP_CAP_CLC_EVT_EN BIT(0)
 
 #define MT7921_FIRMWARE_WM		"mediatek/WIFI_RAM_CODE_MT7961_1.bin"
 #define MT7921_ROM_PATCH		"mediatek/WIFI_MT7961_patch_mcu_1_2_hdr.bin"
@@ -52,6 +58,56 @@
 
 #define MT7921_SDIO_HDR_TX_BYTES	GENMASK(15, 0)
 #define MT7921_SDIO_HDR_PKT_TYPE	GENMASK(17, 16)
+
+#define MCU_UNI_EVENT_ROC  0x27
+#define MCU_UNI_EVENT_CLC  0x80
+
+enum {
+	UNI_ROC_ACQUIRE,
+	UNI_ROC_ABORT,
+	UNI_ROC_NUM
+};
+
+enum mt7921_roc_req {
+	MT7921_ROC_REQ_JOIN,
+	MT7921_ROC_REQ_ROC,
+	MT7921_ROC_REQ_NUM
+};
+
+enum {
+	UNI_EVENT_ROC_GRANT = 0,
+	UNI_EVENT_ROC_TAG_NUM
+};
+
+struct mt7921_realease_info {
+	__le16 len;
+	u8 pad_len;
+	u8 tag;
+} __packed;
+
+struct mt7921_fw_features {
+	u8 segment;
+	u8 data;
+	u8 rsv[14];
+} __packed;
+
+struct mt7921_roc_grant_tlv {
+	__le16 tag;
+	__le16 len;
+	u8 bss_idx;
+	u8 tokenid;
+	u8 status;
+	u8 primarychannel;
+	u8 rfsco;
+	u8 rfband;
+	u8 channelwidth;
+	u8 centerfreqseg1;
+	u8 centerfreqseg2;
+	u8 reqtype;
+	u8 dbdcband;
+	u8 rsv[1];
+	__le32 max_interval;
+} __packed;
 
 enum mt7921_sdio_pkt_type {
 	MT7921_SDIO_TXD,
@@ -157,6 +213,14 @@ enum {
 	MT7921_CLC_MAX_NUM,
 };
 
+enum mt7921_reg_power_type {
+	MT_AP_UNSET = 0,
+	MT_AP_DEFAULT,
+	MT_AP_LPI,
+	MT_AP_SP,
+	MT_AP_VLP,
+};
+
 struct mt7921_clc_rule {
 	u8 alpha2[2];
 	u8 type[2];
@@ -194,6 +258,8 @@ struct mt7921_phy {
 
 	u8 sta_work_count;
 
+	u8 clc_chan_conf;
+	enum mt7921_reg_power_type power_type;
 	struct sk_buff_head scan_event_list;
 	struct delayed_work scan_work;
 #ifdef CONFIG_ACPI
@@ -201,6 +267,13 @@ struct mt7921_phy {
 #endif
 
 	struct mt7921_clc *clc[MT7921_CLC_MAX_NUM];
+	u64 chip_cap;
+
+	struct work_struct roc_work;
+	struct timer_list roc_timer;
+	wait_queue_head_t roc_wait;
+	u8 roc_token_id;
+	bool roc_grant;
 };
 
 #define mt7921_init_reset(dev)		((dev)->hif_ops->init_reset(dev))
@@ -230,6 +303,8 @@ struct mt7921_dev {
 	bool hw_full_reset:1;
 	bool hw_init_done:1;
 	bool fw_assert:1;
+	bool regd_in_progress:1;
+	wait_queue_head_t wait;
 
 	struct list_head sta_poll_list;
 	spinlock_t sta_poll_lock;
@@ -237,6 +312,7 @@ struct mt7921_dev {
 	struct work_struct init_work;
 
 	u8 fw_debug;
+	u8 fw_features;
 
 	struct mt76_connac_pm pm;
 	struct mt76_connac_coredump coredump;
@@ -396,6 +472,7 @@ mt7921_skb_add_usb_sdio_hdr(struct mt7921_dev *dev, struct sk_buff *skb,
 }
 
 void mt7921_stop(struct ieee80211_hw *hw);
+void mt7921_regd_update(struct mt7921_dev *dev);
 int mt7921_mac_init(struct mt7921_dev *dev);
 bool mt7921_mac_wtbl_update(struct mt7921_dev *dev, int idx, u32 mask);
 void mt7921_mac_reset_counters(struct mt7921_phy *phy);
@@ -435,6 +512,8 @@ int mt7921_mcu_uni_rx_ba(struct mt7921_dev *dev,
 			 struct ieee80211_ampdu_params *params,
 			 bool enable);
 void mt7921_scan_work(struct work_struct *work);
+void mt7921_roc_work(struct work_struct *work);
+void mt7921_roc_timer(struct timer_list *timer);
 int mt7921_mcu_uni_bss_ps(struct mt7921_dev *dev, struct ieee80211_vif *vif);
 int mt7921_mcu_drv_pmctrl(struct mt7921_dev *dev);
 int mt7921_mcu_fw_pmctrl(struct mt7921_dev *dev);
@@ -476,6 +555,8 @@ void mt7921_set_ipv6_ns_work(struct work_struct *work);
 
 int mt7921_mcu_set_sniffer(struct mt7921_dev *dev, struct ieee80211_vif *vif,
 			   bool enable);
+int mt7921_mcu_config_sniffer(struct mt7921_vif *vif,
+			      struct ieee80211_chanctx_conf *ctx);
 
 int mt7921_usb_sdio_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
 				   enum mt76_txq_id qid, struct mt76_wcid *wcid,
@@ -502,6 +583,7 @@ int mt7921_mcu_uni_add_beacon_offload(struct mt7921_dev *dev,
 int mt7921_init_acpi_sar(struct mt7921_dev *dev);
 int mt7921_init_acpi_sar_power(struct mt7921_phy *phy, bool set_default);
 u8 mt7921_acpi_get_flags(struct mt7921_phy *phy);
+u8 mt7921_acpi_get_mtcl_conf(struct mt7921_phy *phy, char *alpha2);
 #else
 static inline int
 mt7921_init_acpi_sar(struct mt7921_dev *dev)
@@ -520,10 +602,22 @@ mt7921_acpi_get_flags(struct mt7921_phy *phy)
 {
 	return 0;
 }
+
+static inline u8 mt7921_acpi_get_mtcl_conf(struct mt7921_phy *phy, char *alpha2)
+{
+	return 0xf;
+}
 #endif
 int mt7921_set_tx_sar_pwr(struct ieee80211_hw *hw,
 			  const struct cfg80211_sar_specs *sar);
 
 int mt7921_mcu_set_clc(struct mt7921_dev *dev, u8 *alpha2,
 		       enum environment_cap env_cap);
+int mt7921_mcu_set_roc(struct mt7921_phy *phy, struct mt7921_vif *vif,
+		       struct ieee80211_channel *chan, int duration,
+		       enum mt7921_roc_req type, u8 token_id);
+int mt7921_mcu_abort_roc(struct mt7921_phy *phy, struct mt7921_vif *vif,
+			 u8 token_id);
+void mt7921_roc_abort_sync(struct mt7921_dev *dev);
+u8 mt7921_check_offload_capability(struct device *dev, const char *fw_wm);
 #endif

@@ -33,7 +33,7 @@ mac80211-y := \
 	spectmgmt.o \
 	tx.o \
 	key.o \
-	util.o \
+	util.o parse.o \
 	wme.o \
 	chan.o \
 	trace.o mlme.o \
@@ -58,7 +58,6 @@ mac80211-$(CPTCFG_MAC80211_MESH) += \
 	mesh_ps.o
 
 mac80211-$(CONFIG_PM) += pm.o
-mac80211-y += arc4.o
 
 CFLAGS_trace.o := -I$(srctree)/$(src)
 
@@ -73,8 +72,12 @@ rc80211_minstrel-$(CPTCFG_MAC80211_DEBUGFS) += \
 
 mac80211-$(CPTCFG_MAC80211_RC_MINSTREL) += $(rc80211_minstrel-y)
 
+obj-y += tests/
+
+mac80211-y += wbrf.o
+
 ccflags-y += -DDEBUG
 
-mac80211-y += backports.o cfg-utils.o
+mac80211-y += backports.o
 
 iwl7000_mac80211-objs := $(mac80211-objs) $(mac80211-y)

@@ -110,6 +110,8 @@ struct kvm_userspace_memory_region {
  */
 #define KVM_MEM_LOG_DIRTY_PAGES	(1UL << 0)
 #define KVM_MEM_READONLY	(1UL << 1)
+/* KVM_MEM_GUEST_MEMFD (1UL << 2) */
+#define KVM_MEM_NON_COHERENT_DMA (1UL << 3)
 
 /* for KVM_IRQ_LINE */
 struct kvm_irq_level {
@@ -1120,9 +1122,12 @@ struct kvm_ppc_resize_hpt {
 #define KVM_CAP_ARM_MTE 205
 #define KVM_CAP_ARM_PROTECTED_VM 0xffbadab1
 #define KVM_CAP_UCLAMP_SYNC 1024
+#define KVM_CAP_COUNTER_OFFSET 227
+#define KVM_CAP_USER_CONFIGURE_NONCOHERENT_DMA 236
 #define KVM_CAP_GET_CUR_CPUFREQ 512
 #define KVM_CAP_UTIL_HINT 513
 #define KVM_CAP_GET_CPUFREQ_TBL 514
+#define KVM_CAP_PV_SCHED	600
 
 #ifdef KVM_CAP_IRQ_ROUTING
 
@@ -1469,6 +1474,8 @@ struct kvm_s390_ucas_mapping {
 #define KVM_SET_PMU_EVENT_FILTER  _IOW(KVMIO,  0xb2, struct kvm_pmu_event_filter)
 #define KVM_PPC_SVM_OFF		  _IO(KVMIO,  0xb3)
 #define KVM_ARM_MTE_COPY_TAGS	  _IOR(KVMIO,  0xb4, struct kvm_arm_copy_mte_tags)
+/* Available with KVM_CAP_COUNTER_OFFSET */
+#define KVM_ARM_SET_COUNTER_OFFSET _IOW(KVMIO,  0xb5, struct kvm_arm_counter_offset)
 
 /* ioctl for vm fd */
 #define KVM_CREATE_DEVICE	  _IOWR(KVMIO,  0xe0, struct kvm_create_device)
@@ -2017,5 +2024,9 @@ struct kvm_stats_desc {
 };
 
 #define KVM_GET_STATS_FD  _IO(KVMIO,  0xce)
+
+/* Available with KVM_CAP_PV_SCHED */
+#define KVM_SET_PV_SCHED_ENABLED	_IOW(KVMIO, 0xe0, int)
+#define KVM_GET_PV_SCHED_ENABLED	_IOR(KVMIO, 0xe1, int)
 
 #endif /* __LINUX_KVM_H */

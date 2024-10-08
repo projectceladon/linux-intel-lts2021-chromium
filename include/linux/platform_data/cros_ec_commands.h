@@ -3488,6 +3488,34 @@ union __ec_align_offset1 ec_response_get_next_data_v1 {
 };
 BUILD_ASSERT(sizeof(union ec_response_get_next_data_v1) == 16);
 
+union __ec_align_offset1 ec_response_get_next_data_v3 {
+	uint8_t key_matrix[18];
+
+	/* Unaligned */
+	uint32_t host_event;
+	uint64_t host_event64;
+
+	struct __ec_todo_unpacked {
+		/* For aligning the fifo_info */
+		uint8_t reserved[3];
+		struct ec_response_motion_sense_fifo_info info;
+	} sensor_fifo;
+
+	uint32_t buttons;
+
+	uint32_t switches;
+
+	uint32_t fp_events;
+
+	uint32_t sysrq;
+
+	/* CEC events from enum mkbp_cec_event */
+	uint32_t cec_events;
+
+	uint8_t cec_message[16];
+};
+BUILD_ASSERT(sizeof(union ec_response_get_next_data_v3) == 18);
+
 struct ec_response_get_next_event {
 	uint8_t event_type;
 	/* Followed by event data if any */
@@ -3498,6 +3526,12 @@ struct ec_response_get_next_event_v1 {
 	uint8_t event_type;
 	/* Followed by event data if any */
 	union ec_response_get_next_data_v1 data;
+} __ec_align1;
+
+struct ec_response_get_next_event_v3 {
+	uint8_t event_type;
+	/* Followed by event data if any */
+	union ec_response_get_next_data_v3 data;
 } __ec_align1;
 
 /* Bit indices for buttons and switches.*/
@@ -4458,7 +4492,19 @@ struct ec_response_i2c_passthru_protect {
  * These commands are for sending and receiving message via HDMI CEC
  */
 
+#define EC_CEC_MAX_PORTS 16
+
 #define MAX_CEC_MSG_LEN 16
+
+/*
+ * Helper macros for packing/unpacking cec_events.
+ * bits[27:0] : bitmask of events from enum mkbp_cec_event
+ * bits[31:28]: port number
+ */
+#define EC_MKBP_EVENT_CEC_PACK(events, port) \
+		(((events) & GENMASK(27, 0)) | (((port) & 0xf) << 28))
+#define EC_MKBP_EVENT_CEC_GET_EVENTS(event) ((event) & GENMASK(27, 0))
+#define EC_MKBP_EVENT_CEC_GET_PORT(event) (((event) >> 28) & 0xf)
 
 /* CEC message from the AP to be written on the CEC bus */
 #define EC_CMD_CEC_WRITE_MSG 0x00B8
@@ -4471,19 +4517,54 @@ struct ec_params_cec_write {
 	uint8_t msg[MAX_CEC_MSG_LEN];
 } __ec_align1;
 
+/**
+ * struct ec_params_cec_write_v1 - Message to write to the CEC bus
+ * @port: CEC port to write the message on
+ * @msg_len: length of msg in bytes
+ * @msg: message content to write to the CEC bus
+ */
+struct ec_params_cec_write_v1 {
+	uint8_t port;
+	uint8_t msg_len;
+	uint8_t msg[MAX_CEC_MSG_LEN];
+} __ec_align1;
+
+/* CEC message read from a CEC bus reported back to the AP */
+#define EC_CMD_CEC_READ_MSG 0x00B9
+
+/**
+ * struct ec_params_cec_read - Read a message from the CEC bus
+ * @port: CEC port to read a message on
+ */
+struct ec_params_cec_read {
+	uint8_t port;
+} __ec_align1;
+
+/**
+ * struct ec_response_cec_read - Message read from the CEC bus
+ * @msg_len: length of msg in bytes
+ * @msg: message content read from the CEC bus
+ */
+struct ec_response_cec_read {
+	uint8_t msg_len;
+	uint8_t msg[MAX_CEC_MSG_LEN];
+} __ec_align1;
+
 /* Set various CEC parameters */
 #define EC_CMD_CEC_SET 0x00BA
 
 /**
  * struct ec_params_cec_set - CEC parameters set
  * @cmd: parameter type, can be CEC_CMD_ENABLE or CEC_CMD_LOGICAL_ADDRESS
+ * @port: CEC port to set the parameter on
  * @val: in case cmd is CEC_CMD_ENABLE, this field can be 0 to disable CEC
  *	or 1 to enable CEC functionality, in case cmd is
  *	CEC_CMD_LOGICAL_ADDRESS, this field encodes the requested logical
  *	address between 0 and 15 or 0xff to unregister
  */
 struct ec_params_cec_set {
-	uint8_t cmd; /* enum cec_command */
+	uint8_t cmd : 4; /* enum cec_command */
+	uint8_t port : 4;
 	uint8_t val;
 } __ec_align1;
 
@@ -4493,9 +4574,11 @@ struct ec_params_cec_set {
 /**
  * struct ec_params_cec_get - CEC parameters get
  * @cmd: parameter type, can be CEC_CMD_ENABLE or CEC_CMD_LOGICAL_ADDRESS
+ * @port: CEC port to get the parameter on
  */
 struct ec_params_cec_get {
-	uint8_t cmd; /* enum cec_command */
+	uint8_t cmd : 4; /* enum cec_command */
+	uint8_t port : 4;
 } __ec_align1;
 
 /**
@@ -4507,6 +4590,17 @@ struct ec_params_cec_get {
  */
 struct ec_response_cec_get {
 	uint8_t val;
+} __ec_align1;
+
+/* Get the number of CEC ports */
+#define EC_CMD_CEC_PORT_COUNT 0x00C1
+
+/**
+ * struct ec_response_cec_port_count - CEC port count response
+ * @port_count: number of CEC ports
+ */
+struct ec_response_cec_port_count {
+	uint8_t port_count;
 } __ec_align1;
 
 /* CEC parameters command */
@@ -4523,6 +4617,8 @@ enum mkbp_cec_event {
 	EC_MKBP_CEC_SEND_OK			= BIT(0),
 	/* Outgoing message was not acknowledged */
 	EC_MKBP_CEC_SEND_FAILED			= BIT(1),
+	/* Incoming message can be read out by AP */
+	EC_MKBP_CEC_HAVE_DATA			= BIT(2),
 };
 
 /*****************************************************************************/

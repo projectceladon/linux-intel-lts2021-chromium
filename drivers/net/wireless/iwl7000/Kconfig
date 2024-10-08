@@ -13,9 +13,9 @@ config IWL7000
 
 	# things mac80211 selects
 	select CRYPTO
-	select CRYPTO_ARC4
 	select CRYPTO_AES
 	select CRYPTO_CCM
+	select CRYPTO_LIB_ARC4
 	select CRC32
 	select AVERAGE
 
@@ -65,3 +65,4 @@ config IWL7000_VENDOR_CMDS
 
 	  This option mostly exists for non-upstream tagging, so best
 	  leave it set to Y.
+

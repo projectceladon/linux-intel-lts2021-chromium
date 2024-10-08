@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2013-2015, 2018-2023 Intel Corporation
+ * Copyright (C) 2013-2015, 2018-2024 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  */
 #if !defined(__IWL_DBG_CFG_H__) || defined(DBG_CFG_REINCLUDE)
@@ -44,10 +44,12 @@ struct iwl_dbg_cfg {
 	IWL_MOD_PARAM(bool, xvt_default_mode)
 #endif
 	IWL_DBG_CFG_NODEF(bool, disable_wrt_dump)
+	IWL_DBG_CFG_NODEF(u32, wrt_filter_timepoints)
 	IWL_DBG_CFG_NODEF(bool, disable_52GHz)
 	IWL_DBG_CFG_NODEF(bool, disable_24GHz)
 	IWL_DBG_CFG_DEF(bool, FW_MISBEHAVE_NMI,
 			CPTCFG_IWLWIFI_FW_MISBEHAVE_NMI_DEFAULT)
+	IWL_DBG_CFG_NODEF(bool, enable_dbg_asserts)
 #if IS_ENABLED(CPTCFG_IWLMVM)
 	IWL_DBG_CFG_NODEF(u32, MVM_CALIB_OVERRIDE_CONTROL)
 	IWL_DBG_CFG_NODEF(u32, MVM_CALIB_INIT_FLOW)
@@ -94,7 +96,6 @@ struct iwl_dbg_cfg {
 	IWL_DBG_CFG(bool, MVM_TOF_IS_RESPONDER)
 	IWL_DBG_CFG(bool, MVM_P2P_LOWLATENCY_PS_ENABLE)
 	IWL_DBG_CFG(bool, MVM_HW_CSUM_DISABLE)
-	IWL_DBG_CFG(bool, MVM_PARSE_NVM)
 	IWL_DBG_CFG(bool, MVM_ADWELL_ENABLE)
 	IWL_DBG_CFG(u16, MVM_ADWELL_MAX_BUDGET)
 	IWL_DBG_CFG(u32, MVM_TCM_LOAD_MEDIUM_THRESH)
@@ -104,6 +105,7 @@ struct iwl_dbg_cfg {
 	IWL_DBG_CFG_RANGE(u8, MVM_UAPSD_NOAGG_LIST_LEN,
 			  1, IWL_MVM_UAPSD_NOAGG_BSSIDS_NUM)
 	IWL_DBG_CFG(bool, MVM_NON_TRANSMITTING_AP)
+	IWL_DBG_CFG(u16, MVM_CONN_LISTEN_INTERVAL)
 	IWL_DBG_CFG_NODEF(u32, MVM_PHY_FILTER_CHAIN_A)
 	IWL_DBG_CFG_NODEF(u32, MVM_PHY_FILTER_CHAIN_B)
 	IWL_DBG_CFG_NODEF(u32, MVM_PHY_FILTER_CHAIN_C)
@@ -150,6 +152,7 @@ struct iwl_dbg_cfg {
 	IWL_DBG_CFG(u8, MVM_FTM_INITIATOR_ALGO)
 	IWL_DBG_CFG(bool, MVM_FTM_INITIATOR_DYNACK)
 	IWL_DBG_CFG(bool, MVM_FTM_LMR_FEEDBACK_TERMINATE)
+	IWL_DBG_CFG(bool, MVM_FTM_TEST_INCORRECT_SAC)
 	IWL_DBG_CFG_NODEF(bool, MVM_FTM_INITIATOR_MCSI_ENABLED)
 	IWL_DBG_CFG_NODEF(int, MVM_FTM_INITIATOR_COMMON_CALIB)
 	IWL_DBG_CFG_NODEF(bool, MVM_FTM_INITIATOR_FAST_ALGO_DISABLE)
@@ -167,7 +170,6 @@ struct iwl_dbg_cfg {
 	IWL_DBG_CFG(bool, MVM_TWT_TESTMODE)
 	IWL_DBG_CFG(u32, MVM_AMPDU_CONSEC_DROPS_DELBA)
 	IWL_MVM_MOD_PARAM(int, power_scheme)
-	IWL_MVM_MOD_PARAM(bool, init_dbg)
 	IWL_DBG_CFG(bool, MVM_FTM_INITIATOR_ENABLE_SMOOTH)
 	IWL_DBG_CFG_RANGE(u8, MVM_FTM_INITIATOR_SMOOTH_ALPHA, 0, 100)
 	/* 667200 is 200m RTT */
@@ -187,6 +189,19 @@ struct iwl_dbg_cfg {
 	IWL_DBG_CFG(u8, MVM_MIN_BEACON_INTERVAL_TU)
 	IWL_DBG_CFG_RANGE(u8, MVM_ADAPTIVE_DWELL_NUM_APS_OVERRIDE, 0, 10)
 	IWL_DBG_CFG_DEF(int, eml_capa_override, -1)
+	IWL_DBG_CFG(bool, MVM_AUTO_EML_ENABLE)
+	IWL_DBG_CFG(u8, MVM_MISSED_BEACONS_EXIT_ESR_THRESH)
+
+	IWL_DBG_CFG(int, MVM_HIGH_RSSI_THRESH_20MHZ)
+	IWL_DBG_CFG(int, MVM_LOW_RSSI_THRESH_20MHZ)
+	IWL_DBG_CFG(int, MVM_HIGH_RSSI_THRESH_40MHZ)
+	IWL_DBG_CFG(int, MVM_LOW_RSSI_THRESH_40MHZ)
+	IWL_DBG_CFG(int, MVM_HIGH_RSSI_THRESH_80MHZ)
+	IWL_DBG_CFG(int, MVM_LOW_RSSI_THRESH_80MHZ)
+	IWL_DBG_CFG(int, MVM_HIGH_RSSI_THRESH_160MHZ)
+	IWL_DBG_CFG(int, MVM_LOW_RSSI_THRESH_160MHZ)
+	IWL_DBG_CFG(int, MVM_ENTER_ESR_TPT_THRESH)
+
 #endif /* CPTCFG_IWLMVM */
 #ifdef CPTCFG_IWLWIFI_DEVICE_TESTMODE
 	IWL_DBG_CFG_NODEF(u32, dnt_out_mode)
@@ -266,6 +281,9 @@ struct iwl_dbg_cfg {
 	IWL_MOD_PARAM(int, swcrypto)
 	IWL_MOD_PARAM(uint, disable_11n)
 	IWL_MOD_PARAM(u32, enable_ini)
+	IWL_MOD_PARAM(bool, disable_11ac)
+	IWL_MOD_PARAM(bool, disable_11ax)
+	IWL_MOD_PARAM(bool, disable_11be)
 	IWL_DBG_CFG_BIN(he_ppe_thres)
 	IWL_DBG_CFG_NODEF(u8, he_chan_width_dis)
 	IWL_DBG_CFG_NODEF(u32, vht_cap_flip)
@@ -287,6 +305,9 @@ struct iwl_dbg_cfg {
 	IWL_DBG_CFG_NODEF(bool, ht_dynamic_smps)
 	IWL_DBG_CFG_NODEF(bool, amsdu_in_ampdu_disabled)
 	IWL_DBG_CFG_NODEF(bool, disable_eml)
+	IWL_DBG_CFG_NODEF(u32, step_analog_params)
+	IWL_DBG_CFG_NODEF(bool, MVM_DISABLE_SPP_AMSDU_ADV)
+	IWL_DBG_CFG_DEF(int, MVM_SPP_AMSDU_ACTIVATE, -1)
 #ifdef CPTCFG_IWLWIFI_DEBUG
 	IWL_MOD_PARAM(u32, debug_level)
 #endif /* CPTCFG_IWLWIFI_DEBUG */
@@ -306,7 +327,7 @@ struct iwl_dbg_cfg {
 #ifndef DBG_CFG_REINCLUDE
 };
 
-extern struct iwl_dbg_cfg current_dbg_config;
+extern const struct iwl_dbg_cfg default_dbg_config;
 void iwl_dbg_cfg_free(struct iwl_dbg_cfg *dbgcfg);
 void iwl_dbg_cfg_load_ini(struct device *dev, struct iwl_dbg_cfg *dbgcfg);
 #endif /* DBG_CFG_REINCLUDE */

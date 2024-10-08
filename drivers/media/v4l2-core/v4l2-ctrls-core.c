@@ -322,6 +322,11 @@ static void std_log(const struct v4l2_ctrl *ctrl)
 	case V4L2_CTRL_TYPE_HEVC_DECODE_PARAMS:
 		pr_cont("HEVC_DECODE_PARAMS");
 		break;
+	case V4L2_CTRL_TYPE_RECT:
+		pr_cont("%ux%u@%dx%d",
+			ptr.p_rect->width, ptr.p_rect->height,
+			ptr.p_rect->left, ptr.p_rect->top);
+		break;
 	default:
 		pr_cont("unknown type %d", ctrl->type);
 		break;
@@ -539,6 +544,7 @@ static int std_validate_compound(const struct v4l2_ctrl *ctrl, u32 idx,
 	struct v4l2_ctrl_hdr10_mastering_display *p_hdr10_mastering;
 	struct v4l2_ctrl_hevc_decode_params *p_hevc_decode_params;
 	struct v4l2_area *area;
+	struct v4l2_rect *rect;
 	void *p = ptr.p + idx * ctrl->elem_size;
 	unsigned int i;
 
@@ -888,6 +894,12 @@ static int std_validate_compound(const struct v4l2_ctrl *ctrl, u32 idx,
 			return -EINVAL;
 		break;
 
+	case V4L2_CTRL_TYPE_RECT:
+		rect = p;
+		if (!rect->width || !rect->height)
+			return -EINVAL;
+		break;
+
 	default:
 		return -EINVAL;
 	}
@@ -1048,23 +1060,26 @@ void cur_to_new(struct v4l2_ctrl *ctrl)
 	ptr_to_ptr(ctrl, ctrl->p_cur, ctrl->p_new, ctrl->new_elems);
 }
 
-static bool req_alloc_dyn_array(struct v4l2_ctrl_ref *ref, u32 elems)
+static bool req_alloc_array(struct v4l2_ctrl_ref *ref, u32 elems)
 {
 	void *tmp;
 
-	if (elems < ref->p_req_dyn_alloc_elems)
+	if (elems == ref->p_req_array_alloc_elems)
+		return true;
+	if (ref->ctrl->is_dyn_array &&
+	    elems < ref->p_req_array_alloc_elems)
 		return true;
 
 	tmp = kvmalloc(elems * ref->ctrl->elem_size, GFP_KERNEL);
 
 	if (!tmp) {
-		ref->p_req_dyn_enomem = true;
+		ref->p_req_array_enomem = true;
 		return false;
 	}
-	ref->p_req_dyn_enomem = false;
+	ref->p_req_array_enomem = false;
 	kvfree(ref->p_req.p);
 	ref->p_req.p = tmp;
-	ref->p_req_dyn_alloc_elems = elems;
+	ref->p_req_array_alloc_elems = elems;
 	return true;
 }
 
@@ -1077,7 +1092,7 @@ void new_to_req(struct v4l2_ctrl_ref *ref)
 		return;
 
 	ctrl = ref->ctrl;
-	if (ctrl->is_dyn_array && !req_alloc_dyn_array(ref, ctrl->new_elems))
+	if (ctrl->is_array && !req_alloc_array(ref, ctrl->new_elems))
 		return;
 
 	ref->p_req_elems = ctrl->new_elems;
@@ -1094,7 +1109,7 @@ void cur_to_req(struct v4l2_ctrl_ref *ref)
 		return;
 
 	ctrl = ref->ctrl;
-	if (ctrl->is_dyn_array && !req_alloc_dyn_array(ref, ctrl->elems))
+	if (ctrl->is_array && !req_alloc_array(ref, ctrl->elems))
 		return;
 
 	ref->p_req_elems = ctrl->elems;
@@ -1123,26 +1138,30 @@ int req_to_new(struct v4l2_ctrl_ref *ref)
 		return 0;
 	}
 
-	/* Not a dynamic array, so just copy the request value */
-	if (!ctrl->is_dyn_array) {
+	/* Not an array, so just copy the request value */
+	if (!ctrl->is_array) {
 		ptr_to_ptr(ctrl, ref->p_req, ctrl->p_new, ctrl->new_elems);
 		return 0;
 	}
 
 	/* Sanity check, should never happen */
-	if (WARN_ON(!ref->p_req_dyn_alloc_elems))
+	if (WARN_ON(!ref->p_req_array_alloc_elems))
+		return -ENOMEM;
+
+	if (!ctrl->is_dyn_array &&
+	    ref->p_req_elems != ctrl->p_array_alloc_elems)
 		return -ENOMEM;
 
 	/*
 	 * Check if the number of elements in the request is more than the
-	 * elements in ctrl->p_dyn. If so, attempt to realloc ctrl->p_dyn.
-	 * Note that p_dyn is allocated with twice the number of elements
+	 * elements in ctrl->p_array. If so, attempt to realloc ctrl->p_array.
+	 * Note that p_array is allocated with twice the number of elements
 	 * in the dynamic array since it has to store both the current and
 	 * new value of such a control.
 	 */
-	if (ref->p_req_elems > ctrl->p_dyn_alloc_elems) {
+	if (ref->p_req_elems > ctrl->p_array_alloc_elems) {
 		unsigned int sz = ref->p_req_elems * ctrl->elem_size;
-		void *old = ctrl->p_dyn;
+		void *old = ctrl->p_array;
 		void *tmp = kvzalloc(2 * sz, GFP_KERNEL);
 
 		if (!tmp)
@@ -1151,8 +1170,8 @@ int req_to_new(struct v4l2_ctrl_ref *ref)
 		memcpy(tmp + sz, ctrl->p_cur.p, ctrl->elems * ctrl->elem_size);
 		ctrl->p_new.p = tmp;
 		ctrl->p_cur.p = tmp + sz;
-		ctrl->p_dyn = tmp;
-		ctrl->p_dyn_alloc_elems = ref->p_req_elems;
+		ctrl->p_array = tmp;
+		ctrl->p_array_alloc_elems = ref->p_req_elems;
 		kvfree(old);
 	}
 
@@ -1244,7 +1263,7 @@ void v4l2_ctrl_handler_free(struct v4l2_ctrl_handler *hdl)
 	/* Free all nodes */
 	list_for_each_entry_safe(ref, next_ref, &hdl->ctrl_refs, node) {
 		list_del(&ref->node);
-		if (ref->p_req_dyn_alloc_elems)
+		if (ref->p_req_array_alloc_elems)
 			kvfree(ref->p_req.p);
 		kfree(ref);
 	}
@@ -1253,7 +1272,7 @@ void v4l2_ctrl_handler_free(struct v4l2_ctrl_handler *hdl)
 		list_del(&ctrl->node);
 		list_for_each_entry_safe(sev, next_sev, &ctrl->ev_subs, node)
 			list_del(&sev->node);
-		kvfree(ctrl->p_dyn);
+		kvfree(ctrl->p_array);
 		kvfree(ctrl);
 	}
 	kvfree(hdl->buckets);
@@ -1369,7 +1388,7 @@ int handler_new_ref(struct v4l2_ctrl_handler *hdl,
 	if (hdl->error)
 		return hdl->error;
 
-	if (allocate_req && !ctrl->is_dyn_array)
+	if (allocate_req && !ctrl->is_array)
 		size_extra_req = ctrl->elems * ctrl->elem_size;
 	new_ref = kzalloc(sizeof(*new_ref) + size_extra_req, GFP_KERNEL);
 	if (!new_ref)
@@ -1538,6 +1557,9 @@ static struct v4l2_ctrl *v4l2_ctrl_new(struct v4l2_ctrl_handler *hdl,
 	case V4L2_CTRL_TYPE_AREA:
 		elem_size = sizeof(struct v4l2_area);
 		break;
+	case V4L2_CTRL_TYPE_RECT:
+		elem_size = sizeof(struct v4l2_rect);
+		break;
 	default:
 		if (type < V4L2_CTRL_COMPOUND_TYPES)
 			elem_size = sizeof(s32);
@@ -1585,11 +1607,10 @@ static struct v4l2_ctrl *v4l2_ctrl_new(struct v4l2_ctrl_handler *hdl,
 			V4L2_CTRL_FLAG_EXECUTE_ON_WRITE;
 	else if (type == V4L2_CTRL_TYPE_CTRL_CLASS)
 		flags |= V4L2_CTRL_FLAG_READ_ONLY;
-	else if (!(flags & V4L2_CTRL_FLAG_DYNAMIC_ARRAY) &&
+	else if (!is_array &&
 		 (type == V4L2_CTRL_TYPE_INTEGER64 ||
 		  type == V4L2_CTRL_TYPE_STRING ||
-		  type >= V4L2_CTRL_COMPOUND_TYPES ||
-		  is_array))
+		  type >= V4L2_CTRL_COMPOUND_TYPES))
 		sz_extra += 2 * tot_ctrl_size;
 
 	if (type >= V4L2_CTRL_COMPOUND_TYPES && p_def.p_const)
@@ -1633,14 +1654,14 @@ static struct v4l2_ctrl *v4l2_ctrl_new(struct v4l2_ctrl_handler *hdl,
 	ctrl->cur.val = ctrl->val = def;
 	data = &ctrl[1];
 
-	if (ctrl->is_dyn_array) {
-		ctrl->p_dyn_alloc_elems = elems;
-		ctrl->p_dyn = kvzalloc(2 * elems * elem_size, GFP_KERNEL);
-		if (!ctrl->p_dyn) {
+	if (ctrl->is_array) {
+		ctrl->p_array_alloc_elems = elems;
+		ctrl->p_array = kvzalloc(2 * elems * elem_size, GFP_KERNEL);
+		if (!ctrl->p_array) {
 			kvfree(ctrl);
 			return NULL;
 		}
-		data = ctrl->p_dyn;
+		data = ctrl->p_array;
 	}
 
 	if (!ctrl->is_int) {
@@ -1652,7 +1673,7 @@ static struct v4l2_ctrl *v4l2_ctrl_new(struct v4l2_ctrl_handler *hdl,
 	}
 
 	if (type >= V4L2_CTRL_COMPOUND_TYPES && p_def.p_const) {
-		if (ctrl->is_dyn_array)
+		if (ctrl->is_array)
 			ctrl->p_def.p = &ctrl[1];
 		else
 			ctrl->p_def.p = ctrl->p_cur.p + tot_ctrl_size;
@@ -1665,7 +1686,7 @@ static struct v4l2_ctrl *v4l2_ctrl_new(struct v4l2_ctrl_handler *hdl,
 	}
 
 	if (handler_new_ref(hdl, ctrl, NULL, false, false)) {
-		kvfree(ctrl->p_dyn);
+		kvfree(ctrl->p_array);
 		kvfree(ctrl);
 		return NULL;
 	}

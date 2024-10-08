@@ -88,14 +88,11 @@ static int try_to_freeze_tasks(bool user_only)
 	elapsed = ktime_sub(end, start);
 	elapsed_msecs = ktime_to_ms(elapsed);
 
-	if (wakeup) {
+	if (todo) {
 		pr_cont("\n");
-		pr_err("Freezing of tasks aborted after %d.%03d seconds",
-		       elapsed_msecs / 1000, elapsed_msecs % 1000);
-	} else if (todo) {
-		pr_cont("\n");
-		pr_err("Freezing of tasks failed after %d.%03d seconds"
-		       " (%d tasks refusing to freeze, wq_busy=%d):\n",
+		pr_err("Freezing of tasks %s after %d.%03d seconds "
+		       "(%d tasks refusing to freeze, wq_busy=%d):\n",
+		       wakeup ? "aborted" : "failed",
 		       elapsed_msecs / 1000, elapsed_msecs % 1000,
 		       todo - wq_busy, wq_busy);
 
@@ -103,7 +100,7 @@ static int try_to_freeze_tasks(bool user_only)
 			show_all_workqueues();
 
 		trace_android_vh_try_to_freeze_todo_logging(&todo_logging_on);
-		if (pm_debug_messages_on || todo_logging_on) {
+		if (!wakeup || pm_debug_messages_on || todo_logging_on) {
 			read_lock(&tasklist_lock);
 			for_each_process_thread(g, p) {
 				if (p != current && !freezer_should_skip(p)

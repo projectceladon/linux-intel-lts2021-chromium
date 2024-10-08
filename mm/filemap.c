@@ -2576,6 +2576,7 @@ retry:
 			goto err;
 	}
 
+	trace_mm_filemap_get_pages(mapping, index, last_index);
 	return 0;
 err:
 	if (err < 0)
@@ -2647,6 +2648,15 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 		if (unlikely(iocb->ki_pos >= isize))
 			goto put_pages;
 		end_offset = min_t(loff_t, isize, iocb->ki_pos + iter->count);
+
+		/*
+		 * Pairs with a barrier in
+		 * block_write_end()->mark_buffer_dirty() or other page
+		 * dirtying routines like iomap_write_end() to ensure
+		 * changes to page contents are visible before we see
+		 * increased inode size.
+		 */
+		smp_rmb();
 
 		/*
 		 * Once we start copying data, we don't want to be touching any
@@ -3101,6 +3111,8 @@ page_unlock:
 	if (unlikely(offset >= max_off))
 		return VM_FAULT_SIGBUS;
 
+	trace_mm_filemap_fault(mapping, offset);
+
 	/*
 	 * Do we have something in the page cache already?
 	 */
@@ -3253,7 +3265,7 @@ static bool filemap_map_pmd(struct vm_fault *vmf, struct page *page)
 	    }
 	}
 
-	if (pmd_none(*vmf->pmd)) {
+	if (pmd_none(*vmf->pmd) && vmf->prealloc_pte) {
 		vmf->ptl = pmd_lock(mm, vmf->pmd);
 		if (likely(pmd_none(*vmf->pmd))) {
 			mm_inc_nr_ptes(mm);

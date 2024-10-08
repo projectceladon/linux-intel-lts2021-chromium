@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
- * Copyright (C) 2018-2023 Intel Corporation
+ * Copyright (C) 2018-2024 Intel Corporation
  */
 #ifndef __iwl_fw_api_dhc_h__
 #define __iwl_fw_api_dhc_h__
@@ -62,7 +62,7 @@ enum iwl_dhc_umac_integration_table {
 struct iwl_dhc_cmd {
 	__le32 length;
 	__le32 index_and_mask;
-	__le32 data[0];
+	__le32 data[];
 } __packed; /* DHC_CMD_API_S */
 
 /**

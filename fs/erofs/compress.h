@@ -58,7 +58,7 @@ static inline bool z_erofs_is_shortlived_page(struct page *page)
 	return true;
 }
 
-static inline bool z_erofs_put_shortlivedpage(struct page **pagepool,
+static inline bool z_erofs_put_shortlivedpage(struct list_head *pagepool,
 					      struct page *page)
 {
 	if (!z_erofs_is_shortlived_page(page))
@@ -69,7 +69,8 @@ static inline bool z_erofs_put_shortlivedpage(struct page **pagepool,
 		put_page(page);
 	} else {
 		/* follow the pcluster rule above. */
-		erofs_pagepool_add(pagepool, page);
+		set_page_private(page, 0);
+		list_add(&page->lru, pagepool);
 	}
 	return true;
 }
@@ -82,9 +83,9 @@ static inline bool erofs_page_is_managed(const struct erofs_sb_info *sbi,
 }
 
 int z_erofs_decompress(struct z_erofs_decompress_req *rq,
-		       struct page **pagepool);
+		       struct list_head *pagepool);
 
 /* prototypes for specific algorithms */
 int z_erofs_lzma_decompress(struct z_erofs_decompress_req *rq,
-			    struct page **pagepool);
+			    struct list_head *pagepool);
 #endif

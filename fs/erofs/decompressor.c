@@ -63,8 +63,12 @@ int z_erofs_load_lz4_config(struct super_block *sb,
 	return erofs_pcpubuf_growsize(sbi->lz4.max_pclusterblks);
 }
 
+/*
+ * Fill all gaps with bounce pages if it's a sparse page list. Also check if
+ * all physical pages are consecutive, which can be seen for moderate CR.
+ */
 static int z_erofs_lz4_prepare_destpages(struct z_erofs_decompress_req *rq,
-					 struct list_head *pagepool)
+					struct list_head *pagepool)
 {
 	const unsigned int nr =
 		PAGE_ALIGN(rq->pageofs_out + rq->outputsize) >> PAGE_SHIFT;

@@ -2472,6 +2472,40 @@ static void nvme_dev_add(struct nvme_dev *dev)
 	nvme_dbbuf_set(dev);
 }
 
+static unsigned int nvme_pci_nr_maps(struct nvme_dev *dev)
+{
+	if (dev->io_queues[HCTX_TYPE_POLL])
+		return 3;
+	if (dev->io_queues[HCTX_TYPE_READ])
+		return 2;
+	return 1;
+}
+
+static bool nvme_pci_update_nr_queues(struct nvme_dev *dev)
+{
+	if (!dev->ctrl.tagset) {
+		nvme_alloc_io_tag_set(&dev->ctrl, &dev->tagset, &nvme_mq_ops,
+				nvme_pci_nr_maps(dev), sizeof(struct nvme_iod));
+		return true;
+	}
+
+	/* Give up if we are racing with nvme_dev_disable() */
+	if (!mutex_trylock(&dev->shutdown_lock))
+		return false;
+
+	/* Check if nvme_dev_disable() has been executed already */
+	if (!dev->online_queues) {
+		mutex_unlock(&dev->shutdown_lock);
+		return false;
+	}
+
+	blk_mq_update_nr_hw_queues(&dev->tagset, dev->online_queues - 1);
+	/* free previously allocated queues that are no longer usable */
+	nvme_free_queues(dev, dev->online_queues);
+	mutex_unlock(&dev->shutdown_lock);
+	return true;
+}
+
 static int nvme_pci_enable(struct nvme_dev *dev)
 {
 	int result = -ENOMEM;
@@ -2816,16 +2850,19 @@ static void nvme_reset_work(struct work_struct *work)
 	 * Keep the controller around but remove all namespaces if we don't have
 	 * any working I/O queue.
 	 */
-	if (dev->online_queues < 2) {
-		dev_warn(dev->ctrl.device, "IO queues not created\n");
-		nvme_kill_queues(&dev->ctrl);
+	if (dev->online_queues > 1) {
+		nvme_dbbuf_set(dev);
+		nvme_unquiesce_io_queues(&dev->ctrl);
+		nvme_wait_freeze(&dev->ctrl);
+		if (!nvme_pci_update_nr_queues(dev))
+			goto out;
+		nvme_unfreeze(&dev->ctrl);
+	} else {
+		dev_warn(dev->ctrl.device, "IO queues lost\n");
+		nvme_mark_namespaces_dead(&dev->ctrl);
+		nvme_unquiesce_io_queues(&dev->ctrl);
 		nvme_remove_namespaces(&dev->ctrl);
 		nvme_free_tagset(dev);
-	} else {
-		nvme_start_queues(&dev->ctrl);
-		nvme_wait_freeze(&dev->ctrl);
-		nvme_dev_add(dev);
-		nvme_unfreeze(&dev->ctrl);
 	}
 
 	/*

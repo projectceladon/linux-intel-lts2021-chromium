@@ -1271,13 +1271,11 @@ static void nvme_queue_keep_alive_work(struct nvme_ctrl *ctrl)
 			   nvme_keep_alive_work_period(ctrl));
 }
 
-static void nvme_keep_alive_end_io(struct request *rq, blk_status_t status)
+static void nvme_keep_alive_finish(struct request *rq,
+		blk_status_t status, struct nvme_ctrl *ctrl)
 {
-	struct nvme_ctrl *ctrl = rq->end_io_data;
 	unsigned long flags;
 	bool startka = false;
-
-	blk_mq_free_request(rq);
 
 	if (status) {
 		dev_err(ctrl->device,
@@ -1293,7 +1291,7 @@ static void nvme_keep_alive_end_io(struct request *rq, blk_status_t status)
 		startka = true;
 	spin_unlock_irqrestore(&ctrl->lock, flags);
 	if (startka)
-		nvme_queue_keep_alive_work(ctrl);
+		queue_delayed_work(nvme_wq, &ctrl->ka_work, delay);
 }
 
 static void nvme_keep_alive_work(struct work_struct *work)
@@ -1302,6 +1300,7 @@ static void nvme_keep_alive_work(struct work_struct *work)
 			struct nvme_ctrl, ka_work);
 	bool comp_seen = ctrl->comp_seen;
 	struct request *rq;
+	blk_status_t status;
 
 	if ((ctrl->ctratt & NVME_CTRL_ATTR_TBKAS) && comp_seen) {
 		dev_dbg(ctrl->device,
@@ -1321,8 +1320,9 @@ static void nvme_keep_alive_work(struct work_struct *work)
 	}
 
 	rq->timeout = ctrl->kato * HZ;
-	rq->end_io_data = ctrl;
-	blk_execute_rq_nowait(NULL, rq, 0, nvme_keep_alive_end_io);
+	status = blk_execute_rq(rq, false);
+	nvme_keep_alive_finish(rq, status, ctrl);
+	blk_mq_free_request(rq);
 }
 
 static void nvme_start_keep_alive(struct nvme_ctrl *ctrl)

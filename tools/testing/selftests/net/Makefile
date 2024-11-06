@@ -49,6 +49,17 @@ TEST_GEN_FILES += gro
 TEST_GEN_PROGS = reuseport_bpf reuseport_bpf_cpu reuseport_bpf_numa
 TEST_GEN_PROGS += reuseport_dualstack reuseaddr_conflict tls
 TEST_GEN_FILES += toeplitz
+TEST_GEN_FILES += cmsg_sender
+TEST_GEN_FILES += stress_reuseport_listen
+TEST_PROGS += test_vxlan_vnifiltering.sh
+TEST_GEN_FILES += io_uring_zerocopy_tx
+TEST_PROGS += io_uring_zerocopy_tx.sh
+TEST_GEN_FILES += bind_bhash
+TEST_GEN_PROGS += sk_bind_sendto_listen
+TEST_GEN_PROGS += sk_connect_zero_addr
+TEST_PROGS += test_ingress_egress_chaining.sh
+TEST_GEN_FILES += nat6to4.o
+TEST_PROGS += ipv6_route_update_soft_lockup.sh
 
 TEST_FILES := settings
 

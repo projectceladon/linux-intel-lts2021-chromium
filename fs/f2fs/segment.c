@@ -1218,11 +1218,35 @@ static int __submit_discard_cmd(struct f2fs_sb_info *sbi,
 	if (is_sbi_flag_set(sbi, SBI_NEED_FSCK))
 		return 0;
 
-	trace_f2fs_issue_discard(bdev, dc->start, dc->len);
+#ifdef CONFIG_BLK_DEV_ZONED
+        if (f2fs_sb_has_blkzoned(sbi) && bdev_is_zoned(bdev)) {
+                int devi = f2fs_bdev_index(sbi, bdev);
 
-	lstart = dc->lstart;
-	start = dc->start;
-	len = dc->len;
+		if (devi < 0)
+			return -EINVAL;
+
+		if (f2fs_blkz_is_seq(sbi, devi, dc->di.start)) {
+			__submit_zone_reset_cmd(sbi, dc, flag,
+						wait_list, issued);
+			return 0;
+		}
+	}
+#endif
+
+	/*
+	 * stop issuing discard for any of below cases:
+	 * 1. device is conventional zone, but it doesn't support discard.
+	 * 2. device is regulare device, after snapshot it doesn't support
+	 * discard.
+	 */
+	if (!bdev_max_discard_sectors(bdev))
+		return -EOPNOTSUPP;
+
+	trace_f2fs_issue_discard(bdev, dc->di.start, dc->di.len);
+
+	lstart = dc->di.lstart;
+	start = dc->di.start;
+	len = dc->di.len;
 	total_len = len;
 
 	dc->len = 0;

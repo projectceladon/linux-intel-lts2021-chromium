@@ -554,7 +554,60 @@ void __remove_inode_hash(struct inode *inode)
 	spin_unlock(&inode->i_lock);
 	spin_unlock(&inode_hash_lock);
 }
-EXPORT_SYMBOL_NS(__remove_inode_hash, ANDROID_GKI_VFS_EXPORT_ONLY);
+EXPORT_SYMBOL(__remove_inode_hash);
+
+void dump_mapping(const struct address_space *mapping)
+{
+	struct inode *host;
+	const struct address_space_operations *a_ops;
+	struct hlist_node *dentry_first;
+	struct dentry *dentry_ptr;
+	struct dentry dentry;
+	char fname[64] = {};
+	unsigned long ino;
+
+	/*
+	 * If mapping is an invalid pointer, we don't want to crash
+	 * accessing it, so probe everything depending on it carefully.
+	 */
+	if (get_kernel_nofault(host, &mapping->host) ||
+	    get_kernel_nofault(a_ops, &mapping->a_ops)) {
+		pr_warn("invalid mapping:%px\n", mapping);
+		return;
+	}
+
+	if (!host) {
+		pr_warn("aops:%ps\n", a_ops);
+		return;
+	}
+
+	if (get_kernel_nofault(dentry_first, &host->i_dentry.first) ||
+	    get_kernel_nofault(ino, &host->i_ino)) {
+		pr_warn("aops:%ps invalid inode:%px\n", a_ops, host);
+		return;
+	}
+
+	if (!dentry_first) {
+		pr_warn("aops:%ps ino:%lx\n", a_ops, ino);
+		return;
+	}
+
+	dentry_ptr = container_of(dentry_first, struct dentry, d_u.d_alias);
+	if (get_kernel_nofault(dentry, dentry_ptr)) {
+		pr_warn("aops:%ps ino:%lx invalid dentry:%px\n",
+				a_ops, ino, dentry_ptr);
+		return;
+	}
+
+	if (strncpy_from_kernel_nofault(fname, dentry.d_name.name, 63) < 0)
+		strscpy(fname, "<invalid>", 63);
+	/*
+	 * Even if strncpy_from_kernel_nofault() succeeded,
+	 * the fname could be unreliable
+	 */
+	pr_warn("aops:%ps ino:%lx dentry name(?):\"%s\"\n",
+		a_ops, ino, fname);
+}
 
 void clear_inode(struct inode *inode)
 {

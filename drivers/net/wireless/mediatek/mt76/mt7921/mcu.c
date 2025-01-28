@@ -492,7 +492,10 @@ static void mt7921_mcu_parse_tx_resource(struct mt76_dev *dev,
 
 	tx_res = (struct mt7921_tx_resource *)skb->data;
 	sdio->sched.pse_data_quota = le32_to_cpu(tx_res->pse_data_quota);
-	sdio->sched.pse_mcu_quota = le32_to_cpu(tx_res->pse_mcu_quota);
+	sdio->pse_mcu_quota_max = le32_to_cpu(tx_res->pse_mcu_quota);
+	/* The mcu quota usage of this function itself must be taken into consideration */
+	sdio->sched.pse_mcu_quota =
+		sdio->sched.pse_mcu_quota ? sdio->pse_mcu_quota_max : sdio->pse_mcu_quota_max - 1;
 	sdio->sched.ple_data_quota = le32_to_cpu(tx_res->ple_data_quota);
 	sdio->sched.pse_page_size = le16_to_cpu(tx_res->pse_page_size);
 	sdio->sched.deficit = tx_res->pp_padding;
@@ -1476,4 +1479,25 @@ int mt7921_mcu_set_rxfilter(struct mt7921_dev *dev, u32 fif,
 
 	return mt76_mcu_send_msg(&dev->mt76, MCU_CE_CMD(SET_RX_FILTER),
 				 &data, sizeof(data), false);
+}
+
+void mt7921_config_mac_addr_list(struct mt7921_dev *dev)
+{
+	struct ieee80211_hw *hw = mt76_hw(dev);
+	struct wiphy *wiphy = hw->wiphy;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(dev->macaddr_list); i++) {
+		u8 *addr = dev->macaddr_list[i].addr;
+
+		memcpy(addr, dev->mphy.macaddr, ETH_ALEN);
+
+		if (!i)
+			continue;
+
+		addr[0] |= BIT(1);
+		addr[0] ^= ((i - 1) << 2);
+	}
+	wiphy->addresses = dev->macaddr_list;
+	wiphy->n_addresses = ARRAY_SIZE(dev->macaddr_list);
 }

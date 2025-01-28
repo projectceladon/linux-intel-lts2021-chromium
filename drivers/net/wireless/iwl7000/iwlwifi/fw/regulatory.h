@@ -45,6 +45,8 @@
 #define IWL_WTAS_ENABLE_IEC_MSK	0x4
 #define IWL_WTAS_USA_UHB_MSK		BIT(16)
 
+#define BIOS_MCC_CHINA 0x434e
+
 /*
  * The profile for revision 2 is a superset of revision 1, which is in
  * turn a superset of revision 0.  So we can store all revisions
@@ -158,8 +160,9 @@ enum iwl_dsm_values_rfi {
 #define DSM_VALUE_RFI_DISABLE	(DSM_VALUE_RFI_DLVR_DISABLE |\
 				 DSM_VALUE_RFI_DDR_DISABLE)
 
-enum iwl_dsm_masks_reg {
-	DSM_MASK_CHINA_22_REG = BIT(2)
+enum iwl_dsm_values_regulatory_config {
+	DSM_MASK_CHINA_22_REG		= BIT(2),
+	DSM_MASK_ADJUST_TX_POWER	= BIT(3),
 };
 
 struct iwl_fw_runtime;
@@ -220,4 +223,6 @@ static inline u32 iwl_bios_get_ppag_flags(const u32 ppag_modes,
 	return ppag_modes & (ppag_ver < 3 ? IWL_PPAG_ETSI_CHINA_MASK :
 					    IWL_PPAG_REV3_MASK);
 }
+
+bool iwl_puncturing_is_allowed_in_bios(u32 puncturing, u16 mcc);
 #endif /* __fw_regulatory_h__ */

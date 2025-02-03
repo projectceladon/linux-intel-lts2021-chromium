@@ -3072,12 +3072,9 @@ __rmqueue(struct zone *zone, unsigned int order, int migratetype,
 retry:
 	page = __rmqueue_smallest(zone, order, migratetype);
 
-	if (unlikely(!page) ) {
-		if (!page && __rmqueue_fallback(zone, order, migratetype,
+	if (unlikely(!page) && __rmqueue_fallback(zone, order, migratetype,
 								alloc_flags))
-			goto retry;
-		trace_mm_page_alloc_zone_locked(page, order, migratetype);
-	}
+	    goto retry;
 	return page;
 }
 
@@ -3089,7 +3086,9 @@ static struct page *__rmqueue_cma(struct zone *zone, unsigned int order,
 	struct page *page = __rmqueue_cma_fallback(zone, order);
 
 	if (page)
-		trace_mm_page_alloc_zone_locked(page, order, MIGRATE_CMA);
+		trace_mm_page_alloc_zone_locked(page, order, MIGRATE_CMA,
+				pcp_allowed_order(order) &&
+                                migratetype < MIGRATE_PCPTYPES);
 	return page;
 }
 #else

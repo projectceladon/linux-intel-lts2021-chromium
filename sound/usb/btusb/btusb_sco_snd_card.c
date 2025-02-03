@@ -937,7 +937,7 @@ static int btusb_snd_card_create(struct btusb_data *data)
 					&btusb_isoc_playback_ops);
 	snd_pcm_lib_preallocate_pages_for_all(pcm,
 			SNDRV_DMA_TYPE_CONTINUOUS,
-			snd_dma_continuous_data(GFP_KERNEL),
+			NULL,
 			64 * 1024, 64 * 1024);
 	strlcpy(card->driver, "bt_audio_source", sizeof(card->driver));
 	strlcpy(card->shortname, card->driver, sizeof(card->shortname));

@@ -1294,6 +1294,7 @@ static enum page_references page_check_references(struct page *page,
 					  &vm_flags);
 	referenced_page = TestClearPageReferenced(page);
 
+#ifdef CONFIG_LRU_GEN
 	if (lru_gen_enabled()) {
 		int gen = lru_raw_gen_from_flags(READ_ONCE(page->flags));
 
@@ -1302,6 +1303,7 @@ static enum page_references page_check_references(struct page *page,
 		if (gen > ISOLATED_PAGE_MIN)
 			referenced_ptes += gen - ISOLATED_PAGE_MIN;
 	}
+#endif
 
 	/*
 	 * Mlock lost the isolation race with us.  Let try_to_unmap()

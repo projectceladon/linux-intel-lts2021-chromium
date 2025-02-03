@@ -41,9 +41,6 @@
 #include <trace/events/cros_file.h>
 #endif
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/fs.h>
-
 int do_truncate(struct user_namespace *mnt_userns, struct dentry *dentry,
 		loff_t length, unsigned int time_attrs, struct file *filp)
 {

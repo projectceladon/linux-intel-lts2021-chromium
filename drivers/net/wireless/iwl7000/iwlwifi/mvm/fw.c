@@ -1374,6 +1374,28 @@ static void iwl_mvm_lari_cfg(struct iwl_mvm *mvm)
 	}
 }
 
+static void iwl_mvm_tx_power_limit_cfg(struct iwl_mvm *mvm)
+{
+	u32 cmd_id = WIDE_ID(REGULATORY_AND_NVM_GROUP,
+			     TX_POWER_LIMIT_OVERRIDE_CMD);
+	struct iwl_tx_power_override_cmd cmd = {};
+	int val;
+	int ret;
+
+	if (iwl_fw_lookup_cmd_ver(mvm->fw, cmd_id, 0) != 1)
+		return;
+
+	ret = iwl_bios_get_dsm(&mvm->fwrt, DSM_FUNC_REGULATORY_CONFIG, &val);
+	if (ret < 0 || !(val & DSM_MASK_ADJUST_TX_POWER))
+		return;
+
+	ret = iwl_mvm_send_cmd_pdu(mvm, cmd_id, 0, sizeof(cmd), &cmd);
+	if (ret < 0)
+		IWL_DEBUG_RADIO(mvm,
+				"Failed to send TX_POWER_LIMIT_OVERRIDE_CMD (%d)\n",
+				ret);
+}
+
 void iwl_mvm_get_bios_tables(struct iwl_mvm *mvm)
 {
 	int ret;
@@ -1499,7 +1521,7 @@ void iwl_mvm_send_recovery_cmd(struct iwl_mvm *mvm, u32 flags)
 
 static int iwl_mvm_sar_init(struct iwl_mvm *mvm)
 {
-#if defined(CPTCFG_IWLMVM_VENDOR_CMDS) && defined(CONFIG_ACPI)
+#if defined(CPTCFG_IWL_VENDOR_CMDS) && defined(CONFIG_ACPI)
 	/*
 	 * if no profile was chosen by the user yet, choose profile 1 (WRDS) as
 	 * default for both chains
@@ -1636,6 +1658,7 @@ int iwl_mvm_up(struct iwl_mvm *mvm)
 	}
 
 	iwl_mvm_lari_cfg(mvm);
+	iwl_mvm_tx_power_limit_cfg(mvm);
 
 	/* Init RSS configuration */
 	ret = iwl_configure_rxq(&mvm->fwrt);
@@ -1750,7 +1773,7 @@ int iwl_mvm_up(struct iwl_mvm *mvm)
 			goto error;
 	}
 
-#ifdef CPTCFG_IWLMVM_VENDOR_CMDS
+#ifdef CPTCFG_IWL_VENDOR_CMDS
 	/* set_mode must be IWL_TX_POWER_MODE_SET_DEVICE if this was
 	 * ever initialized.
 	 */
@@ -1779,7 +1802,7 @@ int iwl_mvm_up(struct iwl_mvm *mvm)
 					 len, &mvm->txp_cmd))
 			IWL_ERR(mvm, "failed to update TX power\n");
 	}
-#endif /* CPTCFG_IWLMVM_VENDOR_CMDS */
+#endif /* CPTCFG_IWL_VENDOR_CMDS */
 
 	if (test_bit(IWL_MVM_STATUS_IN_HW_RESTART, &mvm->status)) {
 		iwl_mvm_send_recovery_cmd(mvm, ERROR_RECOVERY_UPDATE_DB);

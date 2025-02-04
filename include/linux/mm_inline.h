@@ -92,18 +92,36 @@ static __always_inline enum lru_list page_lru(struct page *page)
 
 #ifdef CONFIG_LRU_GEN
 
+#ifdef CONFIG_LRU_GEN_ENABLED
 static inline bool lru_gen_enabled(void)
 {
-#ifdef CONFIG_LRU_GEN_ENABLED
 	DECLARE_STATIC_KEY_TRUE(lru_gen_caps[NR_LRU_GEN_CAPS]);
 
 	return static_branch_likely(&lru_gen_caps[LRU_GEN_CORE]);
+}
+
+static inline bool lru_gen_aggressive_mm(void)
+{
+	DECLARE_STATIC_KEY_TRUE(lru_gen_caps[NR_LRU_GEN_CAPS]);
+
+	return static_branch_likely(&lru_gen_caps[LRU_GEN_AGGRESSIVE_MM]);
+}
+
 #else
+static inline bool lru_gen_enabled(void)
+{
 	DECLARE_STATIC_KEY_FALSE(lru_gen_caps[NR_LRU_GEN_CAPS]);
 
 	return static_branch_unlikely(&lru_gen_caps[LRU_GEN_CORE]);
-#endif
 }
+
+static inline bool lru_gen_aggressive_mm(void)
+{
+	DECLARE_STATIC_KEY_FALSE(lru_gen_caps[NR_LRU_GEN_CAPS]);
+
+	return static_branch_likely(&lru_gen_caps[LRU_GEN_AGGRESSIVE_MM]);
+}
+#endif
 
 static inline bool lru_gen_in_fault(void)
 {
@@ -154,11 +172,23 @@ static inline int page_lru_refs(struct page *page)
 	return ((flags & LRU_REFS_MASK) >> LRU_REFS_PGOFF) + workingset;
 }
 
+static inline int lru_raw_gen_from_flags(unsigned long flags)
+{
+	return ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
+}
+
+#define ISOLATED_PAGE_MIN MAX_NR_GENS
+#define ISOLATED_PAGE_MAX (MAX_NR_GENS + 2)
+
 static inline int page_lru_gen(struct page *page)
 {
-	unsigned long flags = READ_ONCE(page->flags);
+	int raw_gen = lru_raw_gen_from_flags(READ_ONCE(page->flags));
 
-	return ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
+	BUILD_BUG_ON(order_base_2(ISOLATED_PAGE_MAX + 1) != LRU_GEN_WIDTH);
+
+	if (raw_gen >= ISOLATED_PAGE_MIN)
+		return -1;
+	return raw_gen;
 }
 
 static inline bool lru_gen_is_active(struct lruvec *lruvec, int gen, int type)
@@ -278,6 +308,7 @@ static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bo
 
 	/* for migrate_page_states() */
 	flags = !reclaiming && lru_gen_is_active(lruvec, gen, type) ? BIT(PG_active) : 0;
+	flags |= (ISOLATED_PAGE_MIN + 1UL) << LRU_GEN_PGOFF;
 	flags = set_mask_bits(&page->flags, LRU_GEN_MASK, flags);
 	gen = ((flags & LRU_GEN_MASK) >> LRU_GEN_PGOFF) - 1;
 
@@ -290,6 +321,11 @@ static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bo
 #else
 
 static inline bool lru_gen_enabled(void)
+{
+	return false;
+}
+
+static inline bool lru_gen_aggressive_mm(void)
 {
 	return false;
 }

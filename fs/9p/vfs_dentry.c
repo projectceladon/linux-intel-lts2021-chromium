@@ -56,6 +56,7 @@ static void v9fs_dentry_release(struct dentry *dentry)
 
 	p9_debug(P9_DEBUG_VFS, " dentry: %pd (%p)\n",
 		 dentry, dentry);
+
 	spin_lock(&dentry->d_lock);
 	hlist_move_list((struct hlist_head *)&dentry->d_fsdata, &head);
 	spin_unlock(&dentry->d_lock);

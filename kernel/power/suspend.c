@@ -591,8 +591,6 @@ static int enter_state(suspend_state_t state)
 	if (error)
 		goto Unlock;
 
-	freeze_dl_server();
-
 	if (suspend_test(TEST_FREEZER))
 		goto Finish;
 
@@ -603,7 +601,6 @@ static int enter_state(suspend_state_t state)
 	pm_restore_gfp_mask();
 
  Finish:
-	thaw_dl_server();
 	events_check_enabled = false;
 	pm_pr_dbg("Finishing wakeup.\n");
 	suspend_finish();

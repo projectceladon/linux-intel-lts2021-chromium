@@ -1863,7 +1863,6 @@ xhci_free_interrupter(struct xhci_hcd *xhci, struct xhci_interrupter *ir)
 
 	kfree(ir);
 }
-EXPORT_SYMBOL_GPL(xhci_free_erst);
 
 void xhci_mem_cleanup(struct xhci_hcd *xhci)
 {

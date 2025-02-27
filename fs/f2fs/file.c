@@ -2764,6 +2764,7 @@ clear_out:
 	clear_inode_flag(inode, FI_SKIP_WRITES);
 out:
 	clear_inode_flag(inode, FI_OPU_WRITE);
+unlock_out:
 	inode_unlock(inode);
 	if (!err)
 		range->len = (u64)total << PAGE_SHIFT;

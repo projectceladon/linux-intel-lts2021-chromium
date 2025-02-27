@@ -10,6 +10,7 @@
 #ifndef __LINUX_RCU_H
 #define __LINUX_RCU_H
 
+#include <linux/slab.h>
 #include <trace/events/rcu.h>
 
 /* Offset to allow distinguishing irq vs. task-based idle entry/exit. */
@@ -199,6 +200,12 @@ static inline void debug_rcu_head_unqueue(struct rcu_head *head)
 {
 }
 #endif	/* #else !CONFIG_DEBUG_OBJECTS_RCU_HEAD */
+
+static inline void debug_rcu_head_callback(struct rcu_head *rhp)
+{
+        if (unlikely(!rhp->func))
+                kmem_dump_obj(rhp);
+}
 
 extern int rcu_cpu_stall_suppress_at_boot;
 
@@ -580,6 +587,11 @@ static inline void show_rcu_tasks_rude_gp_kthread(void) {}
 void show_rcu_tasks_trace_gp_kthread(void);
 #else
 static inline void show_rcu_tasks_trace_gp_kthread(void) {}
+#endif
+#ifdef CONFIG_TINY_RCU
+static inline bool rcu_cpu_beenfullyonline(int cpu) { return true; }
+#else
+bool rcu_cpu_beenfullyonline(int cpu);
 #endif
 
 #endif /* __LINUX_RCU_H */

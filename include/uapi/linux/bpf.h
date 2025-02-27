@@ -949,6 +949,7 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_LSM,
 	BPF_PROG_TYPE_SK_LOOKUP,
 	BPF_PROG_TYPE_SYSCALL, /* a program that can execute syscalls */
+	BPF_PROG_TYPE_NETFILTER,
 };
 
 enum bpf_attach_type {
@@ -994,6 +995,13 @@ enum bpf_attach_type {
 	BPF_SK_REUSEPORT_SELECT,
 	BPF_SK_REUSEPORT_SELECT_OR_MIGRATE,
 	BPF_PERF_EVENT,
+	BPF_TRACE_KPROBE_MULTI,
+	BPF_LSM_CGROUP,
+	BPF_STRUCT_OPS,
+	BPF_NETFILTER,
+	BPF_TCX_INGRESS,
+	BPF_TCX_EGRESS,
+	BPF_TRACE_UPROBE_MULTI,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -1345,14 +1353,19 @@ union bpf_attr {
 	};
 
 	struct { /* anonymous struct used by BPF_PROG_ATTACH/DETACH commands */
-		__u32		target_fd;	/* container object to attach to */
-		__u32		attach_bpf_fd;	/* eBPF program to attach */
-		__u32		attach_type;
-		__u32		attach_flags;
-		__u32		replace_bpf_fd;	/* previously attached eBPF
-						 * program to replace if
-						 * BPF_F_REPLACE is used
-						 */
+		union {
+				__u32   target_fd;      /* target object to attach to or ... */
+				__u32   target_ifindex; /* target ifindex */
+		};
+		__u32           attach_bpf_fd;
+		__u32           attach_type;
+		__u32           attach_flags;
+		__u32           replace_bpf_fd;
+		union {
+				__u32   relative_fd;
+				__u32   relative_id;
+		};
+		__u64           expected_revision;
 	};
 
 	struct { /* anonymous struct used by BPF_PROG_TEST_RUN command */

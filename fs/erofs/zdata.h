@@ -52,6 +52,12 @@ struct z_erofs_collection {
  */
 typedef void *z_erofs_next_pcluster_t;
 
+struct z_erofs_bvec {
+	struct page *page;
+	int offset;
+	unsigned int end;
+};
+
 struct z_erofs_pcluster {
 	struct erofs_workgroup obj;
 	struct z_erofs_collection primary_collection;
@@ -69,7 +75,11 @@ struct z_erofs_pcluster {
 	unsigned char algorithmformat;
 
 	/* A: compressed pages (can be cached or inplaced pages) */
-	struct page *compressed_pages[];
+	//struct page *compressed_pages[];
+
+	/* A: compressed bvecs (can be cached or inplaced pages) */
+    struct z_erofs_bvec compressed_bvecs[];
+
 };
 
 #define z_erofs_primarycollection(pcluster) (&(pcluster)->primary_collection)

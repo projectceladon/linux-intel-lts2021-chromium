@@ -262,6 +262,25 @@ static void xa_node_free(struct xa_node *node)
  * xas_destroy() - Free any resources allocated during the XArray operation.
  * @xas: XArray operation state.
  *
+ * Most users will not need to call this function; it is called for you
+ * by xas_nomem().
+ */
+void xas_destroy(struct xa_state *xas)
+{
+	struct xa_node *next, *node = xas->xa_alloc;
+
+	while (node) {
+		XA_NODE_BUG_ON(node, !list_empty(&node->private_list));
+		next = rcu_dereference_raw(node->parent);
+		radix_tree_node_rcu_free(&node->rcu_head);
+		xas->xa_alloc = node = next;
+	}
+}
+
+/*
+ * xas_destroy() - Free any resources allocated during the XArray operation.
+ * @xas: XArray operation state.
+ *
  * This function is now internal-only.
  */
 static void xas_destroy(struct xa_state *xas)
@@ -1747,6 +1766,37 @@ unlock:
 	return xas_result(&xas, NULL);
 }
 EXPORT_SYMBOL(xa_store_range);
+
+/**
+ * xas_get_order() - Get the order of an entry.
+ * @xas: XArray operation state.
+ *
+ * Called after xas_load, the xas should not be in an error state.
+ *
+ * Return: A number between 0 and 63 indicating the order of the entry.
+ */
+ int xas_get_order(struct xa_state *xas)
+ {
+	int order = 0;
+ 
+	if (!xas->xa_node)
+		return 0;
+ 
+	for (;;) {
+		unsigned int slot = xas->xa_offset + (1 << order);
+ 
+		if (slot >= XA_CHUNK_SIZE)
+			break;
+		if (!xa_is_sibling(xa_entry(xas->xa, xas->xa_node, slot)))
+		    break;
+	    order++;
+	}
+ 
+	order += xas->xa_node->shift;
+    return order;
+}
+EXPORT_SYMBOL_GPL(xas_get_order);
+
 
 /**
  * xa_get_order() - Get the order of an entry.

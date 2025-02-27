@@ -131,6 +131,73 @@ void __put_page(struct page *page)
 }
 EXPORT_SYMBOL(__put_page);
 
+static void __folio_put_small(struct folio *folio)
+{
+        __page_cache_release(folio);
+        mem_cgroup_uncharge(folio);
+        free_unref_page(&folio->page, 0);
+}
+
+static void __folio_put_large(struct folio *folio)
+{
+        /*
+         * __page_cache_release() is supposed to be called for thp, not for
+         * hugetlb. This is because hugetlb page does never have PageLRU set
+         * (it's never listed to any LRU lists) and no memcg routines should
+         * be called for hugetlb (it has a separate hugetlb_cgroup.)
+         */
+        if (!folio_test_hugetlb(folio))
+                __page_cache_release(folio);
+        destroy_large_folio(folio);
+}
+
+/*static inline enum zone_type page_zonenum(const struct page *page)
+{
+    ASSERT_EXCLUSIVE_BITS(page->flags, ZONES_MASK << ZONES_PGSHIFT);
+    return (page->flags >> ZONES_PGSHIFT) & ZONES_MASK;
+}*/
+
+static inline enum zone_type folio_zonenum(const struct folio *folio)
+{
+    return page_zonenum(&folio->page);
+}
+
+#ifdef CONFIG_ZONE_DEVICE
+static inline bool is_zone_device_page(const struct page *page)
+{
+        return page_zonenum(page) == ZONE_DEVICE;
+}
+extern void memmap_init_zone_device(struct zone *, unsigned long,
+                                    unsigned long, struct dev_pagemap *);
+#else
+static inline bool is_zone_device_page(const struct page *page)
+{
+        return false;
+}
+#endif
+
+static inline bool folio_is_zone_device(const struct folio *folio)
+{
+    return is_zone_device_page(&folio->page);
+}
+
+/*static inline bool is_zone_movable_page(const struct page *page)
+{
+    return page_zonenum(page) == ZONE_MOVABLE;
+}*/
+
+
+void __folio_put(struct folio *folio)
+{
+        if (unlikely(folio_is_zone_device(folio)))
+                free_zone_device_page(&folio->page);
+        else if (unlikely(folio_test_large(folio)))
+                __folio_put_large(folio);
+        else
+                __folio_put_small(folio);
+}
+EXPORT_SYMBOL(__folio_put);
+
 /**
  * put_pages_list() - release a list of pages
  * @pages: list of pages threaded on page->lru
@@ -295,6 +362,8 @@ void lru_note_cost_page(struct page *page)
 	lru_note_cost(mem_cgroup_page_lruvec(page),
 		      page_is_file_lru(page), thp_nr_pages(page));
 }
+
+
 
 static void __activate_page(struct page *page, struct lruvec *lruvec)
 {
@@ -462,11 +531,241 @@ static void page_inc_refs(struct page *page)
 	} while (new_flags != old_flags &&
 		 cmpxchg(&page->flags, old_flags, new_flags) != old_flags);
 }
+
+void lru_note_cost_folio(struct folio *folio)
+{
+	lru_note_cost(folio_lruvec(folio), folio_is_file_lru(folio),
+			folio_nr_pages(folio));
+}
+
+static void folio_activate_fn(struct lruvec *lruvec, struct folio *folio)
+{
+	if (!folio_test_active(folio) && !folio_test_unevictable(folio)) {
+		long nr_pages = folio_nr_pages(folio);
+
+		lruvec_del_folio(lruvec, folio);
+		folio_set_active(folio);
+		lruvec_add_folio(lruvec, folio);
+		trace_mm_lru_activate(folio);
+
+		__count_vm_events(PGACTIVATE, nr_pages);
+		__count_memcg_events(lruvec_memcg(lruvec), PGACTIVATE,
+				     nr_pages);
+	}
+}
+
+#ifdef CONFIG_SMP
+static void folio_activate_drain(int cpu)
+{
+	struct folio_batch *fbatch = &per_cpu(cpu_fbatches.activate, cpu);
+
+	if (folio_batch_count(fbatch))
+		folio_batch_move_lru(fbatch, folio_activate_fn);
+}
+
+void folio_activate(struct folio *folio)
+{
+	if (folio_test_lru(folio) && !folio_test_active(folio) &&
+	    !folio_test_unevictable(folio)) {
+		struct folio_batch *fbatch;
+
+		folio_get(folio);
+		local_lock(&cpu_fbatches.lock);
+		fbatch = this_cpu_ptr(&cpu_fbatches.activate);
+		folio_batch_add_and_move(fbatch, folio, folio_activate_fn);
+		local_unlock(&cpu_fbatches.lock);
+	}
+}
+
+#else
+static inline void folio_activate_drain(int cpu)
+{
+}
+
+void folio_activate(struct folio *folio)
+{
+	struct lruvec *lruvec;
+
+	if (folio_test_clear_lru(folio)) {
+		lruvec = folio_lruvec_lock_irq(folio);
+		folio_activate_fn(lruvec, folio);
+		unlock_page_lruvec_irq(lruvec);
+		folio_set_lru(folio);
+	}
+}
+#endif
+
+static void __lru_cache_activate_folio(struct folio *folio)
+{
+	struct folio_batch *fbatch;
+	int i;
+
+	local_lock(&cpu_fbatches.lock);
+	fbatch = this_cpu_ptr(&cpu_fbatches.lru_add);
+
+	/*
+	 * Search backwards on the optimistic assumption that the folio being
+	 * activated has just been added to this batch. Note that only
+	 * the local batch is examined as a !LRU folio could be in the
+	 * process of being released, reclaimed, migrated or on a remote
+	 * batch that is currently being drained. Furthermore, marking
+	 * a remote batch's folio active potentially hits a race where
+	 * a folio is marked active just after it is added to the inactive
+	 * list causing accounting errors and BUG_ON checks to trigger.
+	 */
+	for (i = folio_batch_count(fbatch) - 1; i >= 0; i--) {
+		struct folio *batch_folio = fbatch->folios[i];
+
+		if (batch_folio == folio) {
+			folio_set_active(folio);
+			break;
+		}
+	}
+
+	local_unlock(&cpu_fbatches.lock);
+}
+
+static void folio_inc_refs(struct folio *folio)
+{
+	unsigned long new_flags, old_flags = READ_ONCE(folio->flags);
+
+#if 0
+	if (folio_test_unevictable(folio))
+		return;
+
+
+	if (!folio_test_referenced(folio)) {
+		folio_set_referenced(folio);
+		return;
+	}
+#endif
+
+	if (!folio_test_workingset(folio)) {
+		folio_set_workingset(folio);
+		return;
+	}
+
+	/* see the comment on MAX_NR_TIERS */
+	do {
+		new_flags = old_flags & LRU_REFS_MASK;
+		if (new_flags == LRU_REFS_MASK)
+			break;
+
+		new_flags += BIT(LRU_REFS_PGOFF);
+		new_flags |= old_flags & ~LRU_REFS_MASK;
+	} while (!try_cmpxchg(&folio->flags, &old_flags, new_flags));
+}
 #else
 static void page_inc_refs(struct page *page)
 {
 }
+
+static void folio_inc_refs(struct folio *folio)
+{
+}
 #endif /* CONFIG_LRU_GEN */
+
+/*
+ * Mark a page as having seen activity.
+ *
+ * inactive,unreferenced	->	inactive,referenced
+ * inactive,referenced		->	active,unreferenced
+ * active,unreferenced		->	active,referenced
+ *
+ * When a newly allocated page is not yet visible, so safe for non-atomic ops,
+ * __SetPageReferenced(page) may be substituted for mark_page_accessed(page).
+ */
+ void folio_mark_accessed(struct folio *folio)
+ {
+	if (lru_gen_enabled()) {
+	    folio_inc_refs(folio);
+		return;
+	}
+ 
+#if 0
+	if (!folio_test_referenced(folio)) {
+	    folio_set_referenced(folio);
+	} else
+
+	if (folio_test_unevictable(folio)) {
+        /*
+		 * Unevictable pages are on the "LRU_UNEVICTABLE" list. But,
+		 * this list is never rotated or maintained, so marking an
+		 * unevictable page accessed has no effect.
+		 */
+	} else if (!folio_test_active(folio)) {
+		/*
+		 * If the folio is on the LRU, queue it for activation via
+		 * cpu_fbatches.activate. Otherwise, assume the folio is in a
+		 * folio_batch, mark it active and it'll be moved to the active
+		 * LRU on the next drain.
+		 */
+		if (folio_test_lru(folio))
+		    folio_activate(folio);
+		else
+	 	    __lru_cache_activate_folio(folio);
+		folio_clear_referenced(folio);
+	    workingset_activation(folio);
+	}
+	if (folio_test_idle(folio))
+  	  folio_clear_idle(folio);
+#endif
+}
+EXPORT_SYMBOL(folio_mark_accessed);
+
+/**
+ * folio_add_lru - Add a folio to an LRU list.
+ * @folio: The folio to be added to the LRU.
+ *
+ * Queue the folio for addition to the LRU. The decision on whether
+ * to add the page to the [in]active [file|anon] list is deferred until the
+ * folio_batch is drained. This gives a chance for the caller of folio_add_lru()
+ * have the folio added to the active list using folio_mark_accessed().
+ */
+ void folio_add_lru(struct folio *folio)
+ {
+	 struct folio_batch *fbatch;
+ 
+	 VM_BUG_ON_FOLIO(folio_test_active(folio) &&
+			 folio_test_unevictable(folio), folio);
+	 VM_BUG_ON_FOLIO(folio_test_lru(folio), folio);
+ 
+	 /* see the comment in lru_gen_add_folio() */
+	 if (lru_gen_enabled() && !folio_test_unevictable(folio) &&
+		 lru_gen_in_fault() && !(current->flags & PF_MEMALLOC))
+		 folio_set_active(folio);
+ 
+	 folio_get(folio);
+	 local_lock(&cpu_fbatches.lock);
+	 fbatch = this_cpu_ptr(&cpu_fbatches.lru_add);
+	 folio_batch_add_and_move(fbatch, folio, lru_add_fn);
+	 local_unlock(&cpu_fbatches.lock);
+ }
+ EXPORT_SYMBOL(folio_add_lru);
+ 
+ /**
+  * folio_add_lru_vma() - Add a folio to the appropate LRU list for this VMA.
+  * @folio: The folio to be added to the LRU.
+  * @vma: VMA in which the folio is mapped.
+  *
+  * If the VMA is mlocked, @folio is added to the unevictable list.
+  * Otherwise, it is treated the same way as folio_add_lru().
+  */
+void folio_add_lru_vma(struct folio *folio, struct vm_area_struct *vma)
+{
+	VM_BUG_ON_FOLIO(folio_test_lru(folio), folio);
+
+	if (unlikely((vma->vm_flags & (VM_LOCKED | VM_SPECIAL)) == VM_LOCKED))
+		mlock_new_page(&folio->page);
+	else
+		folio_add_lru(folio);
+}
+
+void lru_note_cost_folio(struct folio *folio)
+{
+	lru_note_cost(folio_lruvec(folio), folio_is_file_lru(folio),
+			folio_nr_pages(folio));
+}
 
 /*
  * Mark a page as having seen activity.

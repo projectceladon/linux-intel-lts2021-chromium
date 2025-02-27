@@ -870,6 +870,122 @@ void replace_page_cache_page(struct page *old, struct page *new)
 }
 EXPORT_SYMBOL_GPL(replace_page_cache_page);
 
+noinline int __filemap_add_folio(struct address_space *mapping,
+	struct folio *folio, pgoff_t index, gfp_t gfp, void **shadowp)
+{
+	XA_STATE(xas, &mapping->i_pages, index);
+	int huge = folio_test_hugetlb(folio);
+	void *alloced_shadow = NULL;
+	int alloced_order = 0;
+	bool charged = false;
+	long nr = 1;
+
+	//VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+	//VM_BUG_ON_FOLIO(folio_test_swapbacked(folio), folio);
+	mapping_set_update(&xas, mapping);
+
+	if (!huge) {
+		int error = mem_cgroup_charge(folio, NULL, gfp);
+		VM_BUG_ON_FOLIO(index & (folio_nr_pages(folio) - 1), folio);
+		if (error)
+			return error;
+		charged = true;
+		xas_set_order(&xas, index, folio_order(folio));
+		nr = folio_nr_pages(folio);
+	}
+
+	gfp &= GFP_RECLAIM_MASK;
+	folio_ref_add(folio, nr);
+	folio->mapping = mapping;
+	folio->index = xas.xa_index;
+
+	for (;;) {
+		int order = -1, split_order = 0;
+		void *entry, *old = NULL;
+
+		xas_lock_irq(&xas);
+		xas_for_each_conflict(&xas, entry) {
+			old = entry;
+			if (!xa_is_value(entry)) {
+				xas_set_err(&xas, -EEXIST);
+				goto unlock;
+			}
+			/*
+			* If a larger entry exists,
+			* it will be the first and only entry iterated.
+			*/
+			if (order == -1)
+				order = xas_get_order(&xas);
+		}
+
+		/* entry may have changed before we re-acquire the lock */
+		if (alloced_order && (old != alloced_shadow || order != alloced_order)) {
+			xas_destroy(&xas);
+			alloced_order = 0;
+		}
+
+		if (old) {
+			if (order > 0 && order > folio_order(folio)) {
+				/* How to handle large swap entries? */
+				BUG_ON(shmem_mapping(mapping));
+				if (!alloced_order) {
+					split_order = order;
+					goto unlock;
+				}
+				xas_split(&xas, old, order);
+				xas_reset(&xas);
+			}
+			if (shadowp)
+				*shadowp = old;
+		}
+
+		xas_store(&xas, folio);
+		if (xas_error(&xas))
+			goto unlock;
+
+		mapping->nrpages += nr;
+
+		/* hugetlb pages do not participate in page cache accounting */
+		if (!huge) {
+			__lruvec_stat_mod_folio(folio, NR_FILE_PAGES, nr);
+			if (folio_test_pmd_mappable(folio))
+				__lruvec_stat_mod_folio(folio,
+						NR_FILE_THPS, nr);
+		}
+
+	unlock:
+		xas_unlock_irq(&xas);
+
+		/* split needed, alloc here and retry. */
+		if (split_order) {
+			xas_split_alloc(&xas, old, split_order, gfp);
+			if (xas_error(&xas))
+				goto error;
+			alloced_shadow = old;
+			alloced_order = split_order;
+			xas_reset(&xas);
+			continue;
+		}
+
+		if (!xas_nomem(&xas, gfp))
+			break;
+	}
+
+	if (xas_error(&xas))
+		goto error;
+
+	//trace_mm_filemap_add_to_page_cache(folio);
+	return 0;
+	error:
+	if (charged)
+		mem_cgroup_uncharge(folio);
+	folio->mapping = NULL;
+	/* Leave page->index set: truncation relies upon it */
+	folio_put_refs(folio, nr);
+	return xas_error(&xas);
+}
+ALLOW_ERROR_INJECTION(__filemap_add_folio, ERRNO);
+
 noinline int __add_to_page_cache_locked(struct page *page,
 					struct address_space *mapping,
 					pgoff_t offset, gfp_t gfp,
@@ -888,12 +1004,14 @@ noinline int __add_to_page_cache_locked(struct page *page,
 	page->mapping = mapping;
 	page->index = offset;
 
+#if 0
 	if (!huge) {
 		error = mem_cgroup_charge(page, NULL, gfp);
 		if (error)
 			goto error;
 		charged = true;
 	}
+#endif
 
 	gfp &= GFP_RECLAIM_MASK;
 
@@ -939,9 +1057,11 @@ unlock:
 
 	if (xas_error(&xas)) {
 		error = xas_error(&xas);
+#if 0
 		if (charged)
 			mem_cgroup_uncharge(page);
 		goto error;
+#endif
 	}
 
 	trace_mm_filemap_add_to_page_cache(page);
@@ -953,6 +1073,34 @@ error:
 	return error;
 }
 ALLOW_ERROR_INJECTION(__add_to_page_cache_locked, ERRNO);
+
+int filemap_add_folio(struct address_space *mapping, struct folio *folio,
+	pgoff_t index, gfp_t gfp)
+{
+	void *shadow = NULL;
+	int ret;
+
+	//__folio_set_locked(folio);
+	ret = __filemap_add_folio(mapping, folio, index, gfp, &shadow);
+	//if (unlikely(ret))
+	//__folio_clear_locked(folio);
+	//else {
+	/*
+	* The folio might have been evicted from cache only
+	* recently, in which case it should be activated like
+	* any other repeatedly accessed folio.
+	* The exception is folios getting rewritten; evicting other
+	* data from the working set, only to cache data that will
+	* get overwritten with something else, is a waste of memory.
+	*/
+	//WARN_ON_ONCE(folio_test_active(folio));
+	if (!(gfp & __GFP_WRITE) && shadow)
+		workingset_refault(folio, shadow);
+	folio_add_lru(folio);
+	//}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(filemap_add_folio);
 
 /**
  * add_to_page_cache_locked - add a locked page to the pagecache
@@ -996,7 +1144,7 @@ int add_to_page_cache_lru(struct page *page, struct address_space *mapping,
 		 */
 		WARN_ON_ONCE(PageActive(page));
 		if (!(gfp_mask & __GFP_WRITE) && shadow)
-			workingset_refault(page, shadow);
+			//workingset_refault(page, shadow);
 		lru_cache_add(page);
 	}
 	return ret;
@@ -1022,6 +1170,27 @@ struct page *__page_cache_alloc(gfp_t gfp)
 	return alloc_pages(gfp, 0);
 }
 EXPORT_SYMBOL(__page_cache_alloc);
+#endif
+
+#ifdef CONFIG_NUMA
+struct folio *filemap_alloc_folio(gfp_t gfp, unsigned int order)
+{
+	int n;
+	struct folio *folio;
+
+	if (cpuset_do_page_mem_spread()) {
+		unsigned int cpuset_mems_cookie;
+		do {
+			cpuset_mems_cookie = read_mems_allowed_begin();
+			n = cpuset_mem_spread_node();
+			folio = __folio_alloc_node(gfp, order, n);
+		} while (!folio && read_mems_allowed_retry(cpuset_mems_cookie));
+
+		return folio;
+	}
+	return folio_alloc(gfp, order);
+}
+EXPORT_SYMBOL(filemap_alloc_folio);
 #endif
 
 /*
@@ -1075,6 +1244,12 @@ EXPORT_SYMBOL(filemap_invalidate_unlock_two);
 #define PAGE_WAIT_TABLE_BITS 8
 #define PAGE_WAIT_TABLE_SIZE (1 << PAGE_WAIT_TABLE_BITS)
 static wait_queue_head_t page_wait_table[PAGE_WAIT_TABLE_SIZE] __cacheline_aligned;
+static wait_queue_head_t folio_wait_table[PAGE_WAIT_TABLE_SIZE] __cacheline_aligned;
+
+static wait_queue_head_t *folio_waitqueue(struct folio *folio)
+{
+	return &folio_wait_table[hash_ptr(folio, PAGE_WAIT_TABLE_BITS)];
+}
 
 static wait_queue_head_t *page_waitqueue(struct page *page)
 {
@@ -1141,10 +1316,10 @@ static int wake_page_function(wait_queue_entry_t *wait, unsigned mode, int sync,
 	 */
 	flags = wait->flags;
 	if (flags & WQ_FLAG_EXCLUSIVE) {
-		if (test_bit(key->bit_nr, &key->page->flags))
+		if (test_bit(key->bit_nr, &key->folio->flags))
 			return -1;
 		if (flags & WQ_FLAG_CUSTOM) {
-			if (test_and_set_bit(key->bit_nr, &key->page->flags))
+			if (test_and_set_bit(key->bit_nr, &key->folio->flags))
 				return -1;
 			flags |= WQ_FLAG_DONE;
 		}
@@ -1183,7 +1358,7 @@ static void wake_up_page_bit(struct page *page, int bit_nr)
 	unsigned long flags;
 	wait_queue_entry_t bookmark;
 
-	key.page = page;
+	key.folio.page = page;
 	key.bit_nr = bit_nr;
 	key.page_match = 0;
 
@@ -1253,6 +1428,23 @@ enum behavior {
 };
 
 /*
+ * Attempt to check (or get) the folio flag, and mark us done
+ * if successful.
+ */
+ static inline bool folio_trylock_flag(struct folio *folio, int bit_nr,
+	struct wait_queue_entry *wait)
+{
+	if (wait->flags & WQ_FLAG_EXCLUSIVE) {
+	if (test_and_set_bit(bit_nr, &folio->flags))
+		return false;
+	} else if (test_bit(bit_nr, &folio->flags))
+		return false;
+
+	wait->flags |= WQ_FLAG_WOKEN | WQ_FLAG_DONE;
+	return true;
+}
+
+/*
  * Attempt to check (or get) the page bit, and mark us done
  * if successful.
  */
@@ -1271,6 +1463,145 @@ static inline bool trylock_page_bit_common(struct page *page, int bit_nr,
 
 /* How many times do we accept lock stealing from under a waiter? */
 int sysctl_page_lock_unfairness = 5;
+
+static inline int folio_wait_bit_common(struct folio *folio, int bit_nr,
+	int state, enum behavior behavior)
+{
+	wait_queue_head_t *q = folio_waitqueue(folio);
+	int unfairness = sysctl_page_lock_unfairness;
+	struct wait_page_queue wait_page;
+	wait_queue_entry_t *wait = &wait_page.wait;
+	bool thrashing = false;
+	unsigned long pflags;
+	bool in_thrashing;
+
+	if (bit_nr == PG_locked &&
+		!folio_test_uptodate(folio) && folio_test_workingset(folio)) {
+		//delayacct_thrashing_start(&in_thrashing);
+		delayacct_thrashing_start();
+		psi_memstall_enter(&pflags);
+		thrashing = true;
+	}
+
+	init_wait(wait);
+	wait->func = wake_page_function;
+	wait_page.folio = folio;
+	wait_page.bit_nr = bit_nr;
+
+	repeat:
+	wait->flags = 0;
+	if (behavior == EXCLUSIVE) {
+		wait->flags = WQ_FLAG_EXCLUSIVE;
+		if (--unfairness < 0)
+			wait->flags |= WQ_FLAG_CUSTOM;
+	}
+
+	/*
+	* Do one last check whether we can get the
+	* page bit synchronously.
+	*
+	* Do the folio_set_waiters() marking before that
+	* to let any waker we _just_ missed know they
+	* need to wake us up (otherwise they'll never
+	* even go to the slow case that looks at the
+	* page queue), and add ourselves to the wait
+	* queue if we need to sleep.
+	*
+	* This part needs to be done under the queue
+	* lock to avoid races.
+	*/
+	spin_lock_irq(&q->lock);
+	//folio_set_waiters(folio);
+	if (!folio_trylock_flag(folio, bit_nr, wait))
+		__add_wait_queue_entry_tail(q, wait);
+	spin_unlock_irq(&q->lock);
+
+	/*
+	* From now on, all the logic will be based on
+	* the WQ_FLAG_WOKEN and WQ_FLAG_DONE flag, to
+	* see whether the page bit testing has already
+	* been done by the wake function.
+	*
+	* We can drop our reference to the folio.
+	*/
+	if (behavior == DROP)
+		folio_put(folio);
+
+	/*
+	* Note that until the "finish_wait()", or until
+	* we see the WQ_FLAG_WOKEN flag, we need to
+	* be very careful with the 'wait->flags', because
+	* we may race with a waker that sets them.
+	*/
+	for (;;) {
+		unsigned int flags;
+
+		set_current_state(state);
+
+		/* Loop until we've been woken or interrupted */
+		flags = smp_load_acquire(&wait->flags);
+		if (!(flags & WQ_FLAG_WOKEN)) {
+			if (signal_pending_state(state, current))
+				break;
+
+			io_schedule();
+			continue;
+		}
+
+		/* If we were non-exclusive, we're done */
+		if (behavior != EXCLUSIVE)
+			break;
+
+		/* If the waker got the lock for us, we're done */
+		if (flags & WQ_FLAG_DONE)
+			break;
+
+		/*
+		* Otherwise, if we're getting the lock, we need to
+		* try to get it ourselves.
+		*
+		* And if that fails, we'll have to retry this all.
+		*/
+		if (unlikely(test_and_set_bit(bit_nr, folio_flags(folio, 0))))
+			goto repeat;
+
+		wait->flags |= WQ_FLAG_DONE;
+		break;
+	}
+
+	/*
+	* If a signal happened, this 'finish_wait()' may remove the last
+	* waiter from the wait-queues, but the folio waiters bit will remain
+	* set. That's ok. The next wakeup will take care of it, and trying
+	* to do it here would be difficult and prone to races.
+	*/
+	finish_wait(q, wait);
+
+	if (thrashing) {
+		//delayacct_thrashing_end(&in_thrashing);
+		delayacct_thrashing_end();
+		psi_memstall_leave(&pflags);
+	}
+
+	/*
+	* NOTE! The wait->flags weren't stable until we've done the
+	* 'finish_wait()', and we could have exited the loop above due
+	* to a signal, and had a wakeup event happen after the signal
+	* test but before the 'finish_wait()'.
+	*
+	* So only after the finish_wait() can we reliably determine
+	* if we got woken up or not, so we can now figure out the final
+	* return value based on that state without races.
+	*
+	* Also note that WQ_FLAG_WOKEN is sufficient for a non-exclusive
+	* waiter, but an exclusive one requires WQ_FLAG_DONE.
+	*/
+	if (behavior == EXCLUSIVE)
+		return wait->flags & WQ_FLAG_DONE ? 0 : -EINTR;
+
+	return wait->flags & WQ_FLAG_WOKEN ? 0 : -EINTR;
+}
+
 
 static inline __sched int wait_on_page_bit_common(wait_queue_head_t *q,
 	struct page *page, int bit_nr, int state, enum behavior behavior)
@@ -1294,7 +1625,7 @@ static inline __sched int wait_on_page_bit_common(wait_queue_head_t *q,
 
 	init_wait(wait);
 	wait->func = wake_page_function;
-	wait_page.page = page;
+	wait_page.folio->page = page;
 	wait_page.bit_nr = bit_nr;
 
 repeat:
@@ -1488,6 +1819,147 @@ static inline bool clear_bit_unlock_is_negative_byte(long nr, volatile void *mem
 }
 
 #endif
+
+static void folio_wake_bit(struct folio *folio, int bit_nr)
+{
+	wait_queue_head_t *q = folio_waitqueue(folio);
+	struct wait_page_key key;
+	unsigned long flags;
+	wait_queue_entry_t bookmark;
+
+	key.folio = folio;
+	key.bit_nr = bit_nr;
+	key.page_match = 0;
+
+	bookmark.flags = 0;
+	bookmark.private = NULL;
+	bookmark.func = NULL;
+	INIT_LIST_HEAD(&bookmark.entry);
+
+	spin_lock_irqsave(&q->lock, flags);
+	__wake_up_locked_key_bookmark(q, TASK_NORMAL, &key, &bookmark);
+
+	while (bookmark.flags & WQ_FLAG_BOOKMARK) {
+		/*
+		 * Take a breather from holding the lock,
+		 * allow pages that finish wake up asynchronously
+		 * to acquire the lock and remove themselves
+		 * from wait queue
+		 */
+		spin_unlock_irqrestore(&q->lock, flags);
+		cpu_relax();
+		spin_lock_irqsave(&q->lock, flags);
+		__wake_up_locked_key_bookmark(q, TASK_NORMAL, &key, &bookmark);
+	}
+
+	/*
+	 * It's possible to miss clearing waiters here, when we woke our page
+	 * waiters, but the hashed waitqueue has waiters for other pages on it.
+	 * That's okay, it's a rare case. The next waker will clear it.
+	 *
+	 * Note that, depending on the page pool (buddy, hugetlb, ZONE_DEVICE,
+	 * other), the flag may be cleared in the course of freeing the page;
+	 * but that is not required for correctness.
+	 */
+	//if (!waitqueue_active(q) || !key.page_match)
+		//folio_clear_waiters(folio);
+
+	spin_unlock_irqrestore(&q->lock, flags);
+}
+
+void folio_wait_bit(struct folio *folio, int bit_nr)
+{
+	folio_wait_bit_common(folio, bit_nr, TASK_UNINTERRUPTIBLE, SHARED);
+}
+EXPORT_SYMBOL(folio_wait_bit);
+
+int folio_wait_bit_killable(struct folio *folio, int bit_nr)
+{
+	return folio_wait_bit_common(folio, bit_nr, TASK_KILLABLE, SHARED);
+}
+EXPORT_SYMBOL(folio_wait_bit_killable);
+
+/**
+ * __folio_lock - Get a lock on the folio, assuming we need to sleep to get it.
+ * @folio: The folio to lock
+ */
+void __folio_lock(struct folio *folio)
+{
+    folio_wait_bit_common(folio, PG_locked, TASK_UNINTERRUPTIBLE,
+								 EXCLUSIVE);
+}
+EXPORT_SYMBOL(__folio_lock);
+ 
+int __folio_lock_killable(struct folio *folio)
+{
+	return folio_wait_bit_common(folio, PG_locked, TASK_KILLABLE,
+										 EXCLUSIVE);
+}
+EXPORT_SYMBOL_GPL(__folio_lock_killable);
+
+/*
+ * Return values:
+ * true - folio is locked; mmap_lock is still held.
+ * false - folio is not locked.
+ *     mmap_lock has been released (mmap_read_unlock(), unless flags had both
+ *     FAULT_FLAG_ALLOW_RETRY and FAULT_FLAG_RETRY_NOWAIT set, in
+ *     which case mmap_lock is still held.
+ *
+ * If neither ALLOW_RETRY nor KILLABLE are set, will always return true
+ * with the folio locked and the mmap_lock unperturbed.
+ */
+ bool __folio_lock_or_retry(struct folio *folio, struct mm_struct *mm,
+	unsigned int flags)
+{
+	if (fault_flag_allow_retry_first(flags)) {
+	/*
+	* CAUTION! In this case, mmap_lock is not released
+	* even though return 0.
+	*/
+	if (flags & FAULT_FLAG_RETRY_NOWAIT)
+	return false;
+
+	mmap_read_unlock(mm);
+	if (flags & FAULT_FLAG_KILLABLE)
+	folio_wait_locked_killable(folio);
+	else
+	folio_wait_locked(folio);
+	return false;
+	}
+	if (flags & FAULT_FLAG_KILLABLE) {
+	bool ret;
+
+	ret = __folio_lock_killable(folio);
+	if (ret) {
+	mmap_read_unlock(mm);
+	return false;
+	}
+	} else {
+	__folio_lock(folio);
+	}
+
+	return true;
+}
+
+/**
+  * folio_unlock - Unlock a locked folio.
+  * @folio: The folio.
+  *
+  * Unlocks the folio and wakes up any thread sleeping on the page lock.
+  *
+  * Context: May be called from interrupt or process context.  May not be
+  * called from NMI context.
+  */
+void folio_unlock(struct folio *folio)
+{
+    /* Bit 7 allows x86 to check the byte's sign bit */
+  	BUILD_BUG_ON(PG_waiters != 7);
+  	BUILD_BUG_ON(PG_locked > 7);
+  	VM_BUG_ON_FOLIO(!folio_test_locked(folio), folio);
+  	if (clear_bit_unlock_is_negative_byte(PG_locked, folio_flags(folio, 0)))
+  		folio_wake_bit(folio, PG_locked);
+}
+EXPORT_SYMBOL(folio_unlock);
 
 /**
  * unlock_page - unlock a locked page
@@ -1814,7 +2286,7 @@ EXPORT_SYMBOL(page_cache_prev_miss);
  *
  * Return: The head page or shadow entry, %NULL if nothing is found.
  */
-static struct page *mapping_get_entry(struct address_space *mapping,
+static void *mapping_get_entry(struct address_space *mapping,
 		pgoff_t index)
 {
 	XA_STATE(xas, &mapping->i_pages, index);
@@ -1850,6 +2322,126 @@ out:
 
 	return page;
 }
+
+/**
+ * __filemap_get_folio - Find and get a reference to a folio.
+ * @mapping: The address_space to search.
+ * @index: The page index.
+ * @fgp_flags: %FGP flags modify how the folio is returned.
+ * @gfp: Memory allocation flags to use if %FGP_CREAT is specified.
+ *
+ * Looks up the page cache entry at @mapping & @index.
+ *
+ * @fgp_flags can be zero or more of these flags:
+ *
+ * * %FGP_ACCESSED - The folio will be marked accessed.
+ * * %FGP_LOCK - The folio is returned locked.
+ * * %FGP_ENTRY - If there is a shadow / swap / DAX entry, return it
+ *   instead of allocating a new folio to replace it.
+ * * %FGP_CREAT - If no page is present then a new page is allocated using
+ *   @gfp and added to the page cache and the VM's LRU list.
+ *   The page is returned locked and with an increased refcount.
+ * * %FGP_FOR_MMAP - The caller wants to do its own locking dance if the
+ *   page is already in cache.  If the page was allocated, unlock it before
+ *   returning so the caller can do the same dance.
+ * * %FGP_WRITE - The page will be written to by the caller.
+ * * %FGP_NOFS - __GFP_FS will get cleared in gfp.
+ * * %FGP_NOWAIT - Don't get blocked by page lock.
+ * * %FGP_STABLE - Wait for the folio to be stable (finished writeback)
+ *
+ * If %FGP_LOCK or %FGP_CREAT are specified then the function may sleep even
+ * if the %GFP flags specified for %FGP_CREAT are atomic.
+ *
+ * If there is a page cache page, it is returned with an increased refcount.
+ *
+ * Return: The found folio or %NULL otherwise.
+ */
+struct folio *__filemap_get_folio(struct address_space *mapping, pgoff_t index,
+	int fgp_flags, gfp_t gfp)
+{
+	struct folio *folio;
+
+	repeat:
+	folio = mapping_get_entry(mapping, index);
+	if (xa_is_value(folio)) {
+		if (fgp_flags & FGP_ENTRY)
+			return folio;
+		folio = NULL;
+	}
+	if (!folio)
+		goto no_page;
+
+	if (fgp_flags & FGP_LOCK) {
+		if (fgp_flags & FGP_NOWAIT) {
+			if (!folio_trylock(folio)) {
+				folio_put(folio);
+				return NULL;
+			}
+		} else {
+			folio_lock(folio);
+		}
+
+		/* Has the page been truncated? */
+		if (unlikely(folio->mapping != mapping)) {
+			folio_unlock(folio);
+			folio_put(folio);
+			goto repeat;
+		}
+		VM_BUG_ON_FOLIO(!folio_contains(folio, index), folio);
+	}
+
+	if (fgp_flags & FGP_ACCESSED)
+		folio_mark_accessed(folio);
+	else if (fgp_flags & FGP_WRITE) {
+		/* Clear idle flag for buffer write */
+		if (folio_test_idle(folio))
+			folio_clear_idle(folio);
+	}
+
+	if (fgp_flags & FGP_STABLE)
+		folio_wait_stable(folio);
+	no_page:
+	if (!folio && (fgp_flags & FGP_CREAT)) {
+		int err;
+		if ((fgp_flags & FGP_WRITE) && mapping_can_writeback(mapping))
+			gfp |= __GFP_WRITE;
+		if (fgp_flags & FGP_NOFS)
+			gfp &= ~__GFP_FS;
+		if (fgp_flags & FGP_NOWAIT) {
+			gfp &= ~GFP_KERNEL;
+			gfp |= GFP_NOWAIT | __GFP_NOWARN;
+		}
+
+		folio = filemap_alloc_folio(gfp, 0);
+		if (!folio)
+			return NULL;
+
+		if (WARN_ON_ONCE(!(fgp_flags & (FGP_LOCK | FGP_FOR_MMAP))))
+			fgp_flags |= FGP_LOCK;
+
+		/* Init accessed so avoid atomic mark_page_accessed later */
+		//if (fgp_flags & FGP_ACCESSED)
+			//__folio_set_referenced(folio);
+
+		err = filemap_add_folio(mapping, folio, index, gfp);
+		if (unlikely(err)) {
+			folio_put(folio);
+			folio = NULL;
+			if (err == -EEXIST)
+				goto repeat;
+		}
+
+		/*
+		* filemap_add_folio locks the page, and for mmap
+		* we expect an unlocked page.
+		*/
+		if (folio && (fgp_flags & FGP_FOR_MMAP))
+			folio_unlock(folio);
+	}
+
+	return folio;
+}
+EXPORT_SYMBOL(__filemap_get_folio);
 
 /**
  * pagecache_get_page - Find and get a reference to a page.

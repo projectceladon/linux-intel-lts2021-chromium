@@ -255,6 +255,13 @@ struct bpf_jmp_history_entry {
 	u32 flags : 10;
 };
 
+struct backtrack_state {
+	struct bpf_verifier_env *env;
+	u32 frame;
+	u32 reg_masks[MAX_CALL_FRAMES];
+	u64 stack_masks[MAX_CALL_FRAMES];
+};
+
 struct bpf_id_pair {
 	u32 old;
 	u32 cur;
@@ -408,6 +415,7 @@ struct bpf_insn_aux_data {
 
 	/* below fields are initialized once */
 	unsigned int orig_idx; /* original instruction index */
+	bool jmp_point;
 	bool prune_point;
 };
 
@@ -503,7 +511,7 @@ struct bpf_verifier_env {
 		int *insn_stack;
 		int cur_stack;
 	} cfg;
-	struct backtrack_state bt;
+	//struct backtrack_state bt;
 	struct bpf_jmp_history_entry *cur_hist_ent;
 	u32 pass_cnt; /* number of times do_check() was called */
 	u32 subprog_cnt;
@@ -525,6 +533,14 @@ struct bpf_verifier_env {
 	/* longest register parentage chain walked for liveness marking */
 	u32 longest_mark_read_walk;
 	bpfptr_t fd_array;
+	/* bit mask to keep track of whether a register has been accessed
+	 * since the last time the function state was printed
+	 */
+	 u32 scratched_regs;
+	 /* Same as scratched_regs but for stack slots */
+	 u64 scratched_stack_slots;
+	 u32 prev_log_len, prev_insn_print_len;
+	 /* buffer used in reg_type_str() to generate reg_type string */ 
 	/* buffer used in reg_type_str() to generate reg_type string */
 	char type_str_buf[TYPE_STR_BUF_LEN];
 

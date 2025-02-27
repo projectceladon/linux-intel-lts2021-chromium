@@ -703,6 +703,37 @@ static inline void *__page_rmapping(struct page *page)
 }
 
 /**
+ * folio_mapping - Find the mapping where this folio is stored.
+ * @folio: The folio.
+ *
+ * For folios which are in the page cache, return the mapping that this
+ * page belongs to.  Folios in the swap cache return the swap mapping
+ * this page is stored in (which is different from the mapping for the
+ * swap file or swap device where the data is stored).
+ *
+ * You can call this for folios which aren't in the swap cache or page
+ * cache and it will return NULL.
+ */
+ struct address_space *folio_mapping(struct folio *folio)
+ {
+	 struct address_space *mapping;
+ 
+	 /* This happens if someone calls flush_dcache_page on slab page */
+	 if (unlikely(folio_test_slab(folio)))
+		 return NULL;
+ 
+	 if (unlikely(folio_test_swapcache(folio)))
+		 return swap_address_space(folio_swap_entry(folio));
+ 
+	 mapping = folio->mapping;
+	 if ((unsigned long)mapping & PAGE_MAPPING_FLAGS)
+		 return NULL;
+ 
+	 return mapping;
+ }
+ EXPORT_SYMBOL(folio_mapping); 
+
+/**
  * __vmalloc_array - allocate memory for a virtually contiguous array.
  * @n: number of elements.
  * @size: element size.

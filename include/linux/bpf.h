@@ -332,8 +332,58 @@ enum bpf_type_flag {
 	 */
 	MEM_ALLOC		= BIT(2 + BPF_BASE_TYPE_BITS),
 
-	__BPF_TYPE_LAST_FLAG	= MEM_ALLOC,
+	/* MEM is in user address space. */
+	MEM_USER		= BIT(3 + BPF_BASE_TYPE_BITS),
+
+	/* MEM is a percpu memory. MEM_PERCPU tags PTR_TO_BTF_ID. When tagged
+	 * with MEM_PERCPU, PTR_TO_BTF_ID _cannot_ be directly accessed. In
+	 * order to drop this tag, it must be passed into bpf_per_cpu_ptr()
+	 * or bpf_this_cpu_ptr(), which will return the pointer corresponding
+	 * to the specified cpu.
+	 */
+	MEM_PERCPU		= BIT(4 + BPF_BASE_TYPE_BITS),
+
+	/* Indicates that the argument will be released. */
+	OBJ_RELEASE		= BIT(5 + BPF_BASE_TYPE_BITS),
+
+	/* PTR is not trusted. This is only used with PTR_TO_BTF_ID, to mark
+	 * unreferenced and referenced kptr loaded from map value using a load
+	 * instruction, so that they can only be dereferenced but not escape the
+	 * BPF program into the kernel (i.e. cannot be passed as arguments to
+	 * kfunc or bpf helpers).
+	 */
+	PTR_UNTRUSTED		= BIT(6 + BPF_BASE_TYPE_BITS),
+
+	/* MEM can be uninitialized. */
+	MEM_UNINIT		= BIT(7 + BPF_BASE_TYPE_BITS),
+
+	/* DYNPTR points to memory local to the bpf program. */
+	DYNPTR_TYPE_LOCAL	= BIT(8 + BPF_BASE_TYPE_BITS),
+
+	/* DYNPTR points to a kernel-produced ringbuf record. */
+	DYNPTR_TYPE_RINGBUF	= BIT(9 + BPF_BASE_TYPE_BITS),
+
+	/* Size is known at compile time. */
+	MEM_FIXED_SIZE		= BIT(10 + BPF_BASE_TYPE_BITS),
+
+	/* Memory must be aligned on some architectures, used in combination with
+	 * MEM_FIXED_SIZE.
+	 */
+	MEM_ALIGNED		= BIT(17 + BPF_BASE_TYPE_BITS),
+
+	/* MEM is being written to, often combined with MEM_UNINIT. Non-presence
+	 * of MEM_WRITE means that MEM is only being read. MEM_WRITE without the
+	 * MEM_UNINIT means that memory needs to be initialized since it is also
+	 * read.
+	 */
+	MEM_WRITE		= BIT(18 + BPF_BASE_TYPE_BITS),
+
+	__BPF_TYPE_FLAG_MAX,
+
+	__BPF_TYPE_LAST_FLAG	= __BPF_TYPE_FLAG_MAX - 1,
 };
+
+#define DYNPTR_TYPE_FLAG_MASK	(DYNPTR_TYPE_LOCAL | DYNPTR_TYPE_RINGBUF)
 
 /* Max number of base types. */
 #define BPF_BASE_TYPE_LIMIT	(1UL << BPF_BASE_TYPE_BITS)
@@ -1030,18 +1080,28 @@ struct bpf_link {
 	enum bpf_link_type type;
 	const struct bpf_link_ops *ops;
 	struct bpf_prog *prog;
-	struct work_struct work;
+	union {
+		struct rcu_head rcu;
+		struct work_struct work;
+    };
 };
 
 struct bpf_link_ops {
 	void (*release)(struct bpf_link *link);
 	void (*dealloc)(struct bpf_link *link);
+    /* deallocate link resources callback, called after RCU grace period;
+     * if underlying BPF program is sleepable we go through tasks trace
+     * RCU GP and then "classic" RCU GP
+     */
+	void (*dealloc_deferred)(struct bpf_link *link);
 	int (*detach)(struct bpf_link *link);
 	int (*update_prog)(struct bpf_link *link, struct bpf_prog *new_prog,
 			   struct bpf_prog *old_prog);
 	void (*show_fdinfo)(const struct bpf_link *link, struct seq_file *seq);
 	int (*fill_link_info)(const struct bpf_link *link,
 			      struct bpf_link_info *info);
+	int (*update_map)(struct bpf_link *link, struct bpf_map *new_map,
+					struct bpf_map *old_map);
 	ANDROID_KABI_RESERVE(1);
 };
 
@@ -2325,5 +2385,29 @@ struct bpf_bprintf_data {
 int bpf_bprintf_prepare(char *fmt, u32 fmt_size, const u64 *raw_args,
 			u32 num_args, struct bpf_bprintf_data *data);
 void bpf_bprintf_cleanup(struct bpf_bprintf_data *data);
+
+/* the implementation of the opaque uapi struct bpf_dynptr */
+struct bpf_dynptr_kern {
+	void *data;
+	/* Size represents the number of usable bytes of dynptr data.
+	 * If for example the offset is at 4 for a local dynptr whose data is
+	 * of type u64, the number of usable bytes is 4.
+	 *
+	 * The upper 8 bits are reserved. It is as follows:
+	 * Bits 0 - 23 = size
+	 * Bits 24 - 30 = dynptr type
+	 * Bit 31 = whether dynptr is read-only
+	 */
+	u32 size;
+	u32 offset;
+} __aligned(8);
+
+enum bpf_dynptr_type {
+	BPF_DYNPTR_TYPE_INVALID,
+	/* Points to memory that is local to the bpf program */
+	BPF_DYNPTR_TYPE_LOCAL,
+	/* Underlying data is a kernel-produced ringbuf record */
+	BPF_DYNPTR_TYPE_RINGBUF,
+};
 
 #endif /* _LINUX_BPF_H */

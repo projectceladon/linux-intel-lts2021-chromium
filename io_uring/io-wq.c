@@ -55,7 +55,6 @@ struct io_worker {
 
 	unsigned long create_state;
 	struct callback_head create_work;
-	int create_index;
 	int init_retries;
 
 	union {
@@ -170,7 +169,8 @@ static inline struct io_wqe_acct *io_work_get_acct(struct io_wqe *wqe,
 
 static inline struct io_wqe_acct *io_wqe_get_acct(struct io_worker *worker)
 {
-	return io_get_acct(worker->wq, test_bit(IO_WORKER_F_BOUND, &worker->flags));
+	//return io_get_acct(worker->wqe, test_bit(IO_WORKER_F_BOUND, &worker->flags));
+	return io_get_acct(worker->wqe, worker->flags & IO_WORKER_F_BOUND);
 }
 
 static void io_worker_ref_put(struct io_wq *wq)
@@ -232,7 +232,7 @@ static void io_worker_exit(struct io_worker *worker)
 		complete(&worker->ref_done);
 	wait_for_completion(&worker->ref_done);
 
-	raw_spin_lock(&wq->lock);
+	raw_spin_lock(&wqe->lock);
 	if (test_bit(IO_WORKER_F_FREE, &worker->flags))
 		hlist_nulls_del_rcu(&worker->nulls_node);
 	list_del_rcu(&worker->all_list);
@@ -424,7 +424,7 @@ static void __io_worker_busy(struct io_wqe *wqe, struct io_worker *worker,
 {
 	if (test_bit(IO_WORKER_F_FREE, &worker->flags)) {
 		clear_bit(IO_WORKER_F_FREE, &worker->flags);
-		raw_spin_lock(&wq->lock);
+		raw_spin_lock(&wqe->lock);
 		hlist_nulls_del_init_rcu(&worker->nulls_node);
 	}
 }
@@ -441,7 +441,7 @@ static void __io_worker_idle(struct io_wqe *wqe, struct io_worker *worker)
 {
 	if (!test_bit(IO_WORKER_F_FREE, &worker->flags)) {
 		set_bit(IO_WORKER_F_FREE, &worker->flags);
-		hlist_nulls_add_head_rcu(&worker->nulls_node, &wq->free_list);
+		hlist_nulls_add_head_rcu(&worker->nulls_node, &wqe->free_list);
 	}
 }
 
@@ -691,7 +691,7 @@ void io_wq_worker_running(struct task_struct *tsk)
 	if (test_bit(IO_WORKER_F_RUNNING, &worker->flags))
 		return;
 	set_bit(IO_WORKER_F_RUNNING, &worker->flags);
-	io_wq_inc_running(worker);
+	io_wqe_inc_running(worker);
 }
 
 /*
@@ -710,7 +710,7 @@ void io_wq_worker_sleeping(struct task_struct *tsk)
 		return;
 
 	clear_bit(IO_WORKER_F_RUNNING, &worker->flags);
-	io_wq_dec_running(worker);
+	io_wqe_dec_running(worker);
 }
 
 static void io_init_new_worker(struct io_wqe *wqe, struct io_worker *worker,
@@ -721,11 +721,11 @@ static void io_init_new_worker(struct io_wqe *wqe, struct io_worker *worker,
 	set_cpus_allowed_ptr(tsk, wqe->cpu_mask);
 	tsk->flags |= PF_NO_SETAFFINITY;
 
-	raw_spin_lock(&wq->lock);
-	hlist_nulls_add_head_rcu(&worker->nulls_node, &wq->free_list);
-	list_add_tail_rcu(&worker->all_list, &wq->all_list);
+	raw_spin_lock(&wqe->lock);
+	hlist_nulls_add_head_rcu(&worker->nulls_node, &wqe->free_list);
+	list_add_tail_rcu(&worker->all_list, &wqe->all_list);
 	set_bit(IO_WORKER_F_FREE, &worker->flags);
-	raw_spin_unlock(&wq->lock);
+	raw_spin_unlock(&wqe->lock);
 	wake_up_new_task(tsk);
 }
 
@@ -917,7 +917,7 @@ static bool io_wq_work_match_item(struct io_wq_work *work, void *data)
 
 static void io_wqe_enqueue(struct io_wqe *wqe, struct io_wq_work *work)
 {
-	struct io_wq_acct *acct = io_work_get_acct(wq, work);
+	struct io_wq_acct *acct = io_work_get_acct(wqe, work);
 	unsigned long work_flags = work->flags;
 	struct io_cb_cancel_data match;
 	bool do_create;

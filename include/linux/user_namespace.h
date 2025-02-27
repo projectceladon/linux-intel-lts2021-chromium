@@ -55,11 +55,15 @@ enum ucount_type {
 	UCOUNT_FANOTIFY_GROUPS,
 	UCOUNT_FANOTIFY_MARKS,
 #endif
-	UCOUNT_RLIMIT_NPROC,
-	UCOUNT_RLIMIT_MSGQUEUE,
-	UCOUNT_RLIMIT_SIGPENDING,
-	UCOUNT_RLIMIT_MEMLOCK,
 	UCOUNT_COUNTS,
+};
+
+enum rlimit_type {
+        UCOUNT_RLIMIT_NPROC,
+        UCOUNT_RLIMIT_MSGQUEUE,
+        UCOUNT_RLIMIT_SIGPENDING,
+        UCOUNT_RLIMIT_MEMLOCK,
+        UCOUNT_RLIMIT_COUNTS,
 };
 
 #define MAX_PER_NAMESPACE_UCOUNTS UCOUNT_RLIMIT_NPROC
@@ -100,6 +104,7 @@ struct user_namespace {
 #endif
 	struct ucounts		*ucounts;
 	long ucount_max[UCOUNT_COUNTS];
+	long rlimit_max[UCOUNT_RLIMIT_COUNTS];
 
 	ANDROID_KABI_RESERVE(1);
 	ANDROID_KABI_RESERVE(2);
@@ -133,7 +138,6 @@ long inc_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v);
 bool dec_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v);
 long inc_rlimit_get_ucounts(struct ucounts *ucounts, enum rlimit_type type,
 			    bool override_rlimit);
-long inc_rlimit_get_ucounts(struct ucounts *ucounts, enum ucount_type type);
 void dec_rlimit_put_ucounts(struct ucounts *ucounts, enum ucount_type type);
 bool is_ucounts_overlimit(struct ucounts *ucounts, enum ucount_type type, unsigned long max);
 

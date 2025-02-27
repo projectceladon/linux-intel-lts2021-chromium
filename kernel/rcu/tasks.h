@@ -6,6 +6,7 @@
  */
 
 #ifdef CONFIG_TASKS_RCU_GENERIC
+#include "rcu_segcblist.h"
 
 ////////////////////////////////////////////////////////////////////////
 //
@@ -83,6 +84,9 @@ struct rcu_tasks_percpu {
  * @kname: This flavor's kthread name.
  */
 struct rcu_tasks {
+	struct rcuwait cbs_wait;
+	raw_spinlock_t cbs_gbl_lock;
+	struct mutex tasks_gp_mutex;
 	struct rcu_head *cbs_head;
 	struct rcu_head **cbs_tail;
 	struct wait_queue_head cbs_wq;
@@ -92,6 +96,7 @@ struct rcu_tasks {
 	int init_fract;
 	unsigned long gp_jiffies;
 	unsigned long gp_start;
+	unsigned long tasks_gp_seq;
 	unsigned long n_gps;
 	unsigned long n_ipis;
 	unsigned long n_ipis_fails;
@@ -142,6 +147,16 @@ module_param(rcu_task_ipi_delay, int, 0644);
 static int rcu_task_stall_timeout __read_mostly = RCU_TASK_STALL_TIMEOUT;
 module_param(rcu_task_stall_timeout, int, 0644);
 
+static int rcu_task_enqueue_lim __read_mostly = -1;
+module_param(rcu_task_enqueue_lim, int, 0444);
+
+static bool rcu_task_cb_adjust;
+static bool rcu_task_cb_adjust;
+static int rcu_task_contend_lim __read_mostly = 100;
+module_param(rcu_task_contend_lim, int, 0444);
+static int rcu_task_collapse_lim __read_mostly = 10;
+module_param(rcu_task_collapse_lim, int, 0444);
+
 static int rcu_task_cpu_ids;
 
 /* RCU tasks grace-period state for debugging. */
@@ -177,6 +192,7 @@ static const char * const rcu_tasks_gp_state_names[] = {
 ////////////////////////////////////////////////////////////////////////
 //
 // Generic code.
+static void rcu_tasks_invoke_cbs_wq(struct work_struct *wp);
 
 /* Record grace-period phase and time. */
 static void set_tasks_gp_state(struct rcu_tasks *rtp, int newstate)
@@ -278,6 +294,11 @@ static void call_rcu_tasks_generic(struct rcu_head *rhp, rcu_callback_t func,
 {
 	unsigned long flags;
 	bool needwake;
+	int ideal_cpu;
+	int chosen_cpu;
+	unsigned long j;
+	bool needadjust = false;
+	struct rcu_tasks_percpu *rtpcp;
 
 	rhp->next = NULL;
 	rhp->func = func;
@@ -569,68 +590,6 @@ static void synchronize_rcu_tasks_generic(struct rcu_tasks *rtp)
 
 	/* Wait for the grace period. */
 	wait_rcu_gp(rtp->call_func);
-}
-
-/* RCU-tasks kthread that detects grace periods and invokes callbacks. */
-static int __noreturn rcu_tasks_kthread(void *arg)
-{
-	unsigned long flags;
-	struct rcu_head *list;
-	struct rcu_head *next;
-	struct rcu_tasks *rtp = arg;
-
-	/* Run on housekeeping CPUs by default.  Sysadm can move if desired. */
-	housekeeping_affine(current, HK_FLAG_RCU);
-	WRITE_ONCE(rtp->kthread_ptr, current); // Let GPs start!
-
-	/*
-	 * Each pass through the following loop makes one check for
-	 * newly arrived callbacks, and, if there are some, waits for
-	 * one RCU-tasks grace period and then invokes the callbacks.
-	 * This loop is terminated by the system going down.  ;-)
-	 */
-	for (;;) {
-		set_tasks_gp_state(rtp, RTGS_WAIT_CBS);
-
-		/* Pick up any new callbacks. */
-		raw_spin_lock_irqsave(&rtp->cbs_lock, flags);
-		smp_mb__after_spinlock(); // Order updates vs. GP.
-		list = rtp->cbs_head;
-		rtp->cbs_head = NULL;
-		rtp->cbs_tail = &rtp->cbs_head;
-		raw_spin_unlock_irqrestore(&rtp->cbs_lock, flags);
-
-		/* If there were none, wait a bit and start over. */
-		if (!list) {
-			wait_event_interruptible(rtp->cbs_wq,
-						 READ_ONCE(rtp->cbs_head));
-			if (!rtp->cbs_head) {
-				WARN_ON(signal_pending(current));
-				set_tasks_gp_state(rtp, RTGS_WAIT_WAIT_CBS);
-				schedule_timeout_idle(HZ/10);
-			}
-			continue;
-		}
-
-		// Wait for one grace period.
-		set_tasks_gp_state(rtp, RTGS_WAIT_GP);
-		rtp->gp_start = jiffies;
-		rtp->gp_func(rtp);
-		rtp->n_gps++;
-
-		/* Invoke the callbacks. */
-		set_tasks_gp_state(rtp, RTGS_INVOKE_CBS);
-		while (list) {
-			next = list->next;
-			local_bh_disable();
-			list->func(list);
-			local_bh_enable();
-			list = next;
-			cond_resched();
-		}
-		/* Paranoid sleep to keep this from entering a tight loop */
-		schedule_timeout_idle(rtp->gp_sleep);
-	}
 }
 
 /* Spawn RCU-tasks grace-period kthread. */

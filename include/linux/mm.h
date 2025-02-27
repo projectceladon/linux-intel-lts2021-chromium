@@ -766,7 +766,7 @@ int vma_is_stack_for_current(struct vm_area_struct *vma);
 struct mmu_gather;
 struct inode;
 
-#include <linux/huge_mm.h>
+//#include <linux/huge_mm.h>
 
 /*
  * Methods to modify the page usage count.
@@ -912,6 +912,7 @@ static inline struct page *virt_to_head_page(const void *x)
 
 void __put_page(struct page *page);
 
+void __folio_put(struct folio *folio);
 void put_pages_list(struct list_head *pages);
 
 void split_page(struct page *page, unsigned int order);
@@ -958,6 +959,24 @@ static inline unsigned int compound_order(struct page *page)
 	return page[1].compound_order;
 }
 
+/**
+ * folio_order - The allocation order of a folio.
+ * @folio: The folio.
+ *
+ * A folio is composed of 2^order pages.  See get_order() for the definition
+ * of order.
+ *
+ * Return: The order of the folio.
+ */
+inline unsigned int folio_order(struct folio *folio)
+{
+	if (!folio_test_large(folio))
+		return 0;
+	return folio->_folio_order;
+}
+
+#include <linux/huge_mm.h>
+
 static inline bool hpage_pincount_available(struct page *page)
 {
 	/*
@@ -968,6 +987,8 @@ static inline bool hpage_pincount_available(struct page *page)
 	page = compound_head(page);
 	return PageCompound(page) && compound_order(page) > 1;
 }
+
+void destroy_large_folio(struct folio *folio);
 
 static inline int head_compound_pincount(struct page *head)
 {
@@ -1237,6 +1258,69 @@ static inline __must_check bool try_get_page(struct page *page)
 	page_ref_inc(page);
 	return true;
 }
+
+static inline int folio_put_testzero(struct folio *folio)
+{
+    return put_page_testzero(&folio->page);
+}
+
+/**
+  * folio_put - Decrement the reference count on a folio.
+  * @folio: The folio.
+  *
+  * If the folio's reference count reaches zero, the memory will be
+  * released back to the page allocator and may be used by another
+  * allocation immediately.  Do not access the memory or the struct folio
+  * after calling folio_put() unless you can be sure that it wasn't the
+  * last reference.
+  *
+  * Context: May be called in process or interrupt context, but not in NMI
+  * context.  May be called while holding a spinlock.
+  */
+static inline void folio_put(struct folio *folio)
+{
+    if (folio_put_testzero(folio))
+    __folio_put(folio);
+}
+
+/**
+ * folio_put_refs - Reduce the reference count on a folio.
+ * @folio: The folio.
+ * @refs: The amount to subtract from the folio's reference count.
+ *
+ * If the folio's reference count reaches zero, the memory will be
+ * released back to the page allocator and may be used by another
+ * allocation immediately.  Do not access the memory or the struct folio
+ * after calling folio_put_refs() unless you can be sure that these weren't
+ * the last references.
+ *
+ * Context: May be called in process or interrupt context, but not in NMI
+ * context.  May be called while holding a spinlock.
+ */
+ static inline void folio_put_refs(struct folio *folio, int refs)
+ {
+	 if (folio_ref_sub_and_test(folio, refs))
+		 __folio_put(folio);
+ }
+ 
+ void release_pages(struct page **pages, int nr);
+ 
+ /**
+  * folios_put - Decrement the reference count on an array of folios.
+  * @folios: The folios.
+  * @nr: How many folios there are.
+  *
+  * Like folio_put(), but for an array of folios.  This is more efficient
+  * than writing the loop yourself as it will optimise the locks which
+  * need to be taken if the folios are freed.
+  *
+  * Context: May be called in process or interrupt context, but not in NMI
+  * context.  May be called while holding a spinlock.
+  */
+ static inline void folios_put(struct folio **folios, unsigned int nr)
+ {
+	release_pages((struct page **)folios, nr);
+ }
 
 static inline void put_page(struct page *page)
 {
@@ -1610,6 +1694,72 @@ static inline void set_page_links(struct page *page, enum zone_type zone,
 #ifdef SECTION_IN_PAGE_FLAGS
 	set_page_section(page, pfn_to_section_nr(pfn));
 #endif
+}
+
+/**
+ * folio_nr_pages - The number of pages in the folio.
+ * @folio: The folio.
+ *
+ * Return: A positive power of two.
+ */
+ static inline long folio_nr_pages(struct folio *folio)
+ {
+		 if (!folio_test_large(folio))
+				 return 1;
+ #ifdef CONFIG_64BIT
+		 return folio->_folio_nr_pages;
+ #else
+		 return 1L << folio->_folio_order;
+ #endif
+ }
+
+/**
+ * folio_next - Move to the next physical folio.
+ * @folio: The folio we're currently operating on.
+ *
+ * If you have physically contiguous memory which may span more than
+ * one folio (eg a &struct bio_vec), use this function to move from one
+ * folio to the next.  Do not use it if the memory is only virtually
+ * contiguous as the folios are almost certainly not adjacent to each
+ * other.  This is the folio equivalent to writing ``page++``.
+ *
+ * Context: We assume that the folios are refcounted and/or locked at a
+ * higher level and do not adjust the reference counts.
+ * Return: The next struct folio.
+ */
+static inline struct folio *folio_next(struct folio *folio)
+{
+	return (struct folio *)folio_page(folio, folio_nr_pages(folio));
+}
+
+/**
+ * folio_shift - The size of the memory described by this folio.
+ * @folio: The folio.
+ *
+ * A folio represents a number of bytes which is a power-of-two in size.
+ * This function tells you which power-of-two the folio is.  See also
+ * folio_size() and folio_order().
+ *
+ * Context: The caller should have a reference on the folio to prevent
+ * it from being split.  It is not necessary for the folio to be locked.
+ * Return: The base-2 logarithm of the size of this folio.
+ */
+static inline unsigned int folio_shift(struct folio *folio)
+{
+	return PAGE_SHIFT + folio_order(folio);
+}
+
+/**
+ * folio_size - The number of bytes in a folio.
+ * @folio: The folio.
+ *
+ * Context: The caller should have a reference on the folio to prevent
+ * it from being split.  It is not necessary for the folio to be locked.
+ * Return: The number of bytes in this folio.
+ */
+static inline size_t folio_size(struct folio *folio)
+{
+	return PAGE_SIZE << folio_order(folio);
 }
 
 /*

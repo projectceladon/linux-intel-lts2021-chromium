@@ -23,6 +23,7 @@
 #include <linux/pstore.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
+#include <linux/cleanup.h>
 
 #include "internal.h"
 
@@ -317,7 +318,8 @@ int pstore_put_backend_records(struct pstore_info *psi)
 	if (!root)
 		return 0;
 
-	scoped_guard(mutex, &records_list_lock) {
+	//scoped_guard(mutex, &records_list_lock) {
+	mutex_lock(&records_list_lock);
 		list_for_each_entry_safe(pos, tmp, &records_list, list) {
 			if (pos->record->psi == psi) {
 				list_del_init(&pos->list);
@@ -326,7 +328,7 @@ int pstore_put_backend_records(struct pstore_info *psi)
 				pos->dentry = NULL;
 			}
 		}
-	}
+	//}
 	mutex_unlock(&records_list_lock);
 
 	inode_unlock(d_inode(root));

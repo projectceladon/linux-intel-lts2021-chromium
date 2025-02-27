@@ -526,6 +526,7 @@ static inline int op_stat_group(unsigned int op)
 		return STAT_DISCARD;
 	return op_is_write(op);
 }
+typedef __u32 __bitwise blk_opf_t;
 
 typedef unsigned int blk_qc_t;
 #define BLK_QC_T_NONE		-1U

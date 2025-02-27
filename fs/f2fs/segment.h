@@ -644,19 +644,28 @@ static inline bool has_not_enough_free_secs(struct f2fs_sb_info *sbi,
 {
 	unsigned int free_secs, lower_secs, upper_secs;
 	bool curseg_space;
+	unsigned int total_node_blocks = get_pages(sbi, F2FS_DIRTY_NODES) +
+					get_pages(sbi, F2FS_DIRTY_DENTS) +
+					get_pages(sbi, F2FS_DIRTY_IMETA);
+	unsigned int total_dent_blocks = get_pages(sbi, F2FS_DIRTY_DENTS);
+	unsigned int node_secs = total_node_blocks / CAP_BLKS_PER_SEC(sbi);
+	unsigned int dent_secs = total_dent_blocks / CAP_BLKS_PER_SEC(sbi);
+	unsigned int node_blocks = total_node_blocks % CAP_BLKS_PER_SEC(sbi);
+	unsigned int dent_blocks = total_dent_blocks % CAP_BLKS_PER_SEC(sbi);
+	unsigned int data_blocks = 0;
 
 	if (unlikely(is_sbi_flag_set(sbi, SBI_POR_DOING)))
 		return false;
 
-	free = free_sections(sbi) + freed;
-	need_lower = node_secs + dent_secs + reserved_sections(sbi) + needed;
-	need_upper = need_lower + (node_blocks ? 1 : 0) + (dent_blocks ? 1 : 0);
+	free_secs = free_sections(sbi) + freed;
+	lower_secs = node_secs + dent_secs + reserved_sections(sbi) + needed;
+	upper_secs = lower_secs + (node_blocks ? 1 : 0) + (dent_blocks ? 1 : 0);
 
-	if (free > need_upper)
+	if (free_secs > upper_secs)
 		return false;
-	else if (free <= need_lower)
+	else if (free_secs <= lower_secs)
 		return true;
-	return !has_curseg_enough_space(sbi, node_blocks, dent_blocks);
+	return !has_curseg_enough_space(sbi, node_blocks, data_blocks, dent_blocks);
 }
 
 static inline bool f2fs_is_checkpoint_ready(struct f2fs_sb_info *sbi)

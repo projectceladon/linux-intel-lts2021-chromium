@@ -205,6 +205,34 @@ static inline unsigned long _compound_head(const struct page *page)
 
 #define compound_head(page)	((typeof(page))_compound_head(page))
 
+/**
+ * page_folio - Converts from page to folio.
+ * @p: The page.
+ *
+ * Every page is part of a folio.  This function cannot be called on a
+ * NULL pointer.
+ *
+ * Context: No reference, nor lock is required on @page.  If the caller
+ * does not hold a reference, this call may race with a folio split, so
+ * it should re-check the folio still contains this page after gaining
+ * a reference on the folio.
+ * Return: The folio which contains this page.
+ */
+#define page_folio(p)		(_Generic((p),				\
+const struct page *:	(const struct folio *)_compound_head(p), \
+struct page *:		(struct folio *)_compound_head(p)))
+
+/**
+ * folio_page - Return a page from a folio.
+ * @folio: The folio.
+ * @n: The page number to return.
+ *
+ * @n is relative to the start of the folio.  This function does not
+ * check that the page number lies within @folio; the caller is presumed
+ * to have a reference to the page.
+ */
+ #define folio_page(folio, n)	nth_page(&(folio)->page, n)
+
 static __always_inline int PageTail(struct page *page)
 {
 	return READ_ONCE(page->compound_head) & 1;
@@ -228,6 +256,15 @@ static inline void page_init_poison(struct page *page, size_t size)
 {
 }
 #endif
+
+static unsigned long *folio_flags(struct folio *folio, unsigned n)
+{
+    struct page *page = &folio->page;
+
+    VM_BUG_ON_PGFLAGS(PageTail(page), page);
+    VM_BUG_ON_PGFLAGS(n > 0 && !test_bit(PG_head, &page->flags), page);
+    return &page[n].flags;
+}
 
 /*
  * Page flags policies wrt compound pages
@@ -272,6 +309,14 @@ static inline void page_init_poison(struct page *page, size_t size)
 #define PF_SECOND(page, enforce) ({					\
 		VM_BUG_ON_PGFLAGS(!PageHead(page), page);		\
 		PF_POISONED_CHECK(&page[1]); })
+
+/* Which page is the flag stored in */
+#define FOLIO_PF_ANY            0
+#define FOLIO_PF_HEAD           0
+#define FOLIO_PF_ONLY_HEAD      0
+#define FOLIO_PF_NO_TAIL        0
+#define FOLIO_PF_NO_COMPOUND    0
+#define FOLIO_PF_SECOND         1
 
 /*
  * Macros to create function definitions for page flags
@@ -410,6 +455,13 @@ PAGEFLAG_FALSE(HighMem)
 #endif
 
 #ifdef CONFIG_SWAP
+static __always_inline bool folio_test_swapcache(struct folio *folio)
+{
+	//return folio_test_swapbacked(folio) &&
+			//test_bit(PG_swapcache, folio_flags(folio, 0));
+	return true;
+}
+
 static __always_inline int PageSwapCache(struct page *page)
 {
 #ifdef CONFIG_THP_SWAP
@@ -532,6 +584,34 @@ TESTPAGEFLAG_FALSE(Ksm)
 
 u64 stable_page_flags(struct page *page);
 
+/**
+ * folio_test_uptodate - Is this folio up to date?
+ * @folio: The folio.
+ *
+ * The uptodate flag is set on a folio when every byte in the folio is
+ * at least as new as the corresponding bytes on storage.  Anonymous
+ * and CoW folios are always uptodate.  If the folio is not uptodate,
+ * some of the bytes in it may be; see the is_partially_uptodate()
+ * address_space operation.
+ */
+static inline bool folio_test_uptodate(struct folio *folio)
+{
+	bool ret = test_bit(PG_uptodate, folio_flags(folio, 0));
+	/*
+	* Must ensure that the data we read out of the folio is loaded
+	* _after_ we've loaded folio->flags to check the uptodate bit.
+	* We can skip the barrier if the folio is not uptodate, because
+	* we wouldn't be reading anything from it.
+	*
+	* See folio_mark_uptodate() for the other side of the story.
+	*/
+	if (ret)
+		smp_rmb();
+
+	return ret;
+}
+
+
 static inline int PageUptodate(struct page *page)
 {
 	int ret;
@@ -592,6 +672,22 @@ static inline void set_page_writeback_keepwrite(struct page *page)
 
 __PAGEFLAG(Head, head, PF_ANY) CLEARPAGEFLAG(Head, head, PF_ANY)
 
+static __always_inline bool folio_test_head(struct folio *folio)
+{
+        return test_bit(PG_head, folio_flags(folio, FOLIO_PF_ANY));
+}
+
+/**
+ * folio_test_large() - Does this folio contain more than one page?
+ * @folio: The folio to test.
+ *
+ * Return: True if the folio is larger than one page.
+ */
+static inline bool folio_test_large(struct folio *folio)
+{
+    return folio_test_head(folio);
+} 
+
 static __always_inline void set_compound_head(struct page *page, struct page *head)
 {
 	WRITE_ONCE(page->compound_head, (unsigned long)head + 1);
@@ -615,6 +711,10 @@ static inline void ClearPageCompound(struct page *page)
 #ifdef CONFIG_HUGETLB_PAGE
 int PageHuge(struct page *page);
 int PageHeadHuge(struct page *page);
+static inline bool folio_test_hugetlb(struct folio *folio)
+{
+	return PageHeadHuge(&folio->page);
+}
 #else
 TESTPAGEFLAG_FALSE(Huge)
 TESTPAGEFLAG_FALSE(HeadHuge)

@@ -439,6 +439,13 @@ static bool reg_type_not_null(enum bpf_reg_type type)
 		type == PTR_TO_SOCK_COMMON;
 }
 
+static bool subprog_is_global(const struct bpf_verifier_env *env, int subprog)
+{
+        struct bpf_func_info_aux *aux = env->prog->aux->func_info_aux;
+
+        return aux && aux[subprog].linkage == BTF_FUNC_GLOBAL;
+}
+
 static bool reg_may_point_to_spin_lock(const struct bpf_reg_state *reg)
 {
 	return reg->type == PTR_TO_MAP_VALUE &&
@@ -612,6 +619,56 @@ static struct bpf_func_state *func(struct bpf_verifier_env *env,
 static const char *kernel_type_name(const struct btf* btf, u32 id)
 {
 	return btf_name_by_offset(btf, btf_type_by_id(btf, id)->name_off);
+}
+
+static void mark_reg_scratched(struct bpf_verifier_env *env, u32 regno)
+{
+	env->scratched_regs |= 1U << regno;
+}
+
+static void mark_stack_slot_scratched(struct bpf_verifier_env *env, u32 spi)
+{
+	env->scratched_stack_slots |= 1ULL << spi;
+}
+
+static bool reg_scratched(const struct bpf_verifier_env *env, u32 regno)
+{
+	return (env->scratched_regs >> regno) & 1;
+}
+
+static bool stack_slot_scratched(const struct bpf_verifier_env *env, u64 regno)
+{
+	return (env->scratched_stack_slots >> regno) & 1;
+}
+
+static bool verifier_state_scratched(const struct bpf_verifier_env *env)
+{
+	return env->scratched_regs || env->scratched_stack_slots;
+}
+
+static void mark_verifier_state_clean(struct bpf_verifier_env *env)
+{
+	env->scratched_regs = 0U;
+	env->scratched_stack_slots = 0ULL;
+}
+
+/* Used for printing the entire verifier state. */
+static void mark_verifier_state_scratched(struct bpf_verifier_env *env)
+{
+	env->scratched_regs = ~0U;
+	env->scratched_stack_slots = ~0ULL;
+}
+
+static enum bpf_dynptr_type arg_to_dynptr_type(enum bpf_arg_type arg_type)
+{
+	switch (arg_type & DYNPTR_TYPE_FLAG_MASK) {
+	case DYNPTR_TYPE_LOCAL:
+		return BPF_DYNPTR_TYPE_LOCAL;
+	case DYNPTR_TYPE_RINGBUF:
+		return BPF_DYNPTR_TYPE_RINGBUF;
+	default:
+		return BPF_DYNPTR_TYPE_INVALID;
+	}
 }
 
 /* The reg state of a pointer or a bounded scalar was saved when
@@ -2065,7 +2122,7 @@ static void mark_insn_zext(struct bpf_verifier_env *env,
 	reg->subreg_def = DEF_NOT_SUBREG;
 }
 
-static int check_reg_arg(struct bpf_verifier_env *env, u32 regno,
+/*static int check_reg_arg(struct bpf_verifier_env *env, u32 regno,
 			 enum reg_arg_type t)
 {
 	struct bpf_verifier_state *vstate = env->cur_state;
@@ -2081,14 +2138,14 @@ static int check_reg_arg(struct bpf_verifier_env *env, u32 regno,
 
 	reg = &regs[regno];
 	rw64 = is_reg64(env, insn, regno, reg, t);
-	if (t == SRC_OP) {
+	if (t == SRC_OP) { */
 		/* check whether register used as source operand can be read */
-		if (reg->type == NOT_INIT) {
+		/*if (reg->type == NOT_INIT) {
 			verbose(env, "R%d !read_ok\n", regno);
 			return -EACCES;
-		}
+		}*/
 		/* We don't need to worry about FP liveness because it's read-only */
-		if (regno == BPF_REG_FP)
+		/*if (regno == BPF_REG_FP)
 			return 0;
 
 		if (rw64)
@@ -2096,6 +2153,51 @@ static int check_reg_arg(struct bpf_verifier_env *env, u32 regno,
 
 		return mark_reg_read(env, reg, reg->parent,
 				     rw64 ? REG_LIVE_READ64 : REG_LIVE_READ32);
+	} else {*/
+		/* check whether register used as dest operand can be written to */
+		/*if (regno == BPF_REG_FP) {
+			verbose(env, "frame pointer is read only\n");
+			return -EACCES;
+		}
+		reg->live |= REG_LIVE_WRITTEN;
+		reg->subreg_def = rw64 ? DEF_NOT_SUBREG : env->insn_idx + 1;
+		if (t == DST_OP)
+			mark_reg_unknown(env, regs, regno);
+	}
+	return 0;
+}*/
+
+static int __check_reg_arg(struct bpf_verifier_env *env, struct bpf_reg_state *regs, u32 regno,
+	enum reg_arg_type t)
+{
+	struct bpf_insn *insn = env->prog->insnsi + env->insn_idx;
+	struct bpf_reg_state *reg;
+	bool rw64;
+
+	if (regno >= MAX_BPF_REG) {
+		verbose(env, "R%d is invalid\n", regno);
+		return -EINVAL;
+	}
+
+	mark_reg_scratched(env, regno);
+
+	reg = &regs[regno];
+	rw64 = is_reg64(env, insn, regno, reg, t);
+	if (t == SRC_OP) {
+	/* check whether register used as source operand can be read */
+	if (reg->type == NOT_INIT) {
+		verbose(env, "R%d !read_ok\n", regno);
+		return -EACCES;
+	}
+	/* We don't need to worry about FP liveness because it's read-only */
+	if (regno == BPF_REG_FP)
+		return 0;
+
+		if (rw64)
+		mark_insn_zext(env, reg);
+
+		return mark_reg_read(env, reg, reg->parent,
+					rw64 ? REG_LIVE_READ64 : REG_LIVE_READ32);
 	} else {
 		/* check whether register used as dest operand can be written to */
 		if (regno == BPF_REG_FP) {
@@ -2105,7 +2207,7 @@ static int check_reg_arg(struct bpf_verifier_env *env, u32 regno,
 		reg->live |= REG_LIVE_WRITTEN;
 		reg->subreg_def = rw64 ? DEF_NOT_SUBREG : env->insn_idx + 1;
 		if (t == DST_OP)
-			mark_reg_unknown(env, regs, regno);
+		mark_reg_unknown(env, regs, regno);
 	}
 	return 0;
 }
@@ -2383,8 +2485,7 @@ static bool calls_callback(struct bpf_verifier_env *env, int insn_idx);
  * the first insn. Its purpose is to compute a bitmask of registers and
  * stack slots that needs precision in the parent verifier state.
  */
-static int backtrack_insn(struct bpf_verifier_env *env, int idx, int subseq_idx,
-			  struct bpf_jmp_history_entry *hist, struct backtrack_state *bt)
+static int backtrack_insn(struct bpf_verifier_env *env, int idx,  u32 *reg_mask, u64 *stack_mask)
 {
 	const struct bpf_insn_cbs cbs = {
 		.cb_call	= disasm_kfunc_name,
@@ -2909,7 +3010,7 @@ static int __mark_chain_precision(struct bpf_verifier_env *env, int frame, int r
 				skip_first = false;
 			} else {
 				hist = get_jmp_hist_entry(st, history, i);
-				err = backtrack_insn(env, i, subseq_idx, hist, bt);
+				err = backtrack_insn(env, i, &reg_mask, &stack_mask);
 			}
 			if (err == -ENOTSUPP) {
 				mark_all_scalars_precise(env, st);

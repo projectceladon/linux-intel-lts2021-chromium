@@ -400,9 +400,9 @@ void *workingset_eviction(struct page *page, struct mem_cgroup *target_memcg)
  * evicted page in the context of the node and the memcg whose memory
  * pressure caused the eviction.
  */
-void workingset_refault(struct page *page, void *shadow)
+void workingset_refault(struct folio *folio, void *shadow)
 {
-	bool file = page_is_file_lru(page);
+	bool file = page_is_file_lru(folio);
 	struct mem_cgroup *eviction_memcg;
 	struct lruvec *eviction_lruvec;
 	unsigned long refault_distance;
@@ -416,7 +416,7 @@ void workingset_refault(struct page *page, void *shadow)
 	int memcgid;
 
 	if (lru_gen_enabled()) {
-		lru_gen_refault(page, shadow);
+		lru_gen_refault(folio, shadow);
 		return;
 	}
 
@@ -472,7 +472,7 @@ void workingset_refault(struct page *page, void *shadow)
 	 * However, the cgroup that will own the page is the one that
 	 * is actually experiencing the refault event.
 	 */
-	memcg = page_memcg(page);
+	memcg = page_memcg(folio);
 	lruvec = mem_cgroup_lruvec(memcg, pgdat);
 
 	inc_lruvec_state(lruvec, WORKINGSET_REFAULT_BASE + file);

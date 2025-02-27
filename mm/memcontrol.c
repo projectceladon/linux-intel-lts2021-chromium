@@ -877,7 +877,6 @@ static unsigned long memcg_events_local(struct mem_cgroup *memcg, int event)
 }
 
 static void mem_cgroup_charge_statistics(struct mem_cgroup *memcg,
-					 struct page *page,
 					 int nr_pages)
 {
 	/* pagein of a big page is an event. So, ignore page size */
@@ -6809,9 +6808,9 @@ void mem_cgroup_calculate_protection(struct mem_cgroup *root,
 			atomic_long_read(&parent->memory.children_low_usage)));
 }
 
-static int charge_memcg(struct page *page, struct mem_cgroup *memcg, gfp_t gfp)
+static int charge_memcg(struct folio *folio, struct mem_cgroup *memcg, gfp_t gfp)
 {
-	unsigned int nr_pages = thp_nr_pages(page);
+	unsigned int nr_pages = thp_nr_pages(folio);
 	int ret;
 
 	ret = try_charge(memcg, gfp, nr_pages);
@@ -6819,11 +6818,11 @@ static int charge_memcg(struct page *page, struct mem_cgroup *memcg, gfp_t gfp)
 		goto out;
 
 	css_get(&memcg->css);
-	commit_charge(page, memcg);
+	commit_charge(folio, memcg);
 
 	local_irq_disable();
-	mem_cgroup_charge_statistics(memcg, page, nr_pages);
-	memcg_check_events(memcg, page);
+	mem_cgroup_charge_statistics(memcg, nr_pages);
+	memcg_check_events(memcg, folio_nid(folio));
 	local_irq_enable();
 out:
 	return ret;
@@ -6843,14 +6842,14 @@ out:
  *
  * Returns 0 on success. Otherwise, an error code is returned.
  */
-int __mem_cgroup_charge(struct page *page, struct mm_struct *mm,
+int __mem_cgroup_charge(struct folio *folio, struct mm_struct *mm,
 			gfp_t gfp_mask)
 {
 	struct mem_cgroup *memcg;
 	int ret;
 
 	memcg = get_mem_cgroup_from_mm(mm);
-	ret = charge_memcg(page, memcg, gfp_mask);
+	ret = charge_memcg(folio, memcg, gfp_mask);
 	css_put(&memcg->css);
 
 	return ret;
@@ -6960,6 +6959,65 @@ static void uncharge_batch(const struct uncharge_gather *ug)
 	css_put(&ug->memcg->css);
 }
 
+static void uncharge_folio(struct folio *folio, struct uncharge_gather *ug)
+{
+	long nr_pages;
+	struct mem_cgroup *memcg;
+	struct obj_cgroup *objcg;
+
+	VM_BUG_ON_FOLIO(folio_test_lru(folio), folio);
+
+	/*
+	 * Nobody should be changing or seriously looking at
+	 * folio memcg or objcg at this point, we have fully
+	 * exclusive access to the folio.
+	 */
+	if (folio_memcg_kmem(folio)) {
+		objcg = __folio_objcg(folio);
+		/*
+		 * This get matches the put at the end of the function and
+		 * kmem pages do not hold memcg references anymore.
+		 */
+		memcg = get_mem_cgroup_from_objcg(objcg);
+	} else {
+		memcg = __folio_memcg(folio);
+	}
+
+	if (!memcg)
+		return;
+
+	if (ug->memcg != memcg) {
+		if (ug->memcg) {
+			uncharge_batch(ug);
+			uncharge_gather_clear(ug);
+		}
+		ug->memcg = memcg;
+		ug->nid = folio_nid(folio);
+
+		/* pairs with css_put in uncharge_batch */
+		css_get(&memcg->css);
+	}
+
+	nr_pages = folio_nr_pages(folio);
+
+	if (folio_memcg_kmem(folio)) {
+		ug->nr_memory += nr_pages;
+		ug->nr_kmem += nr_pages;
+
+		folio->memcg_data = 0;
+		obj_cgroup_put(objcg);
+	} else {
+		/* LRU pages aren't accounted at the root level */
+		if (!mem_cgroup_is_root(memcg))
+			ug->nr_memory += nr_pages;
+		ug->pgpgout++;
+
+		folio->memcg_data = 0;
+	}
+
+	css_put(&memcg->css);
+}
+
 static void uncharge_page(struct page *page, struct uncharge_gather *ug)
 {
 	unsigned long nr_pages;
@@ -7026,16 +7084,16 @@ static void uncharge_page(struct page *page, struct uncharge_gather *ug)
  *
  * Uncharge a page previously charged with __mem_cgroup_charge().
  */
-void __mem_cgroup_uncharge(struct page *page)
+void __mem_cgroup_uncharge(struct folio *folio)
 {
 	struct uncharge_gather ug;
 
 	/* Don't touch page->lru of any random page, pre-check: */
-	if (!page_memcg(page))
+	if (!folio_memcg(folio))
 		return;
 
 	uncharge_gather_clear(&ug);
-	uncharge_page(page, &ug);
+	uncharge_folio(folio, &ug);
 	uncharge_batch(&ug);
 }
 

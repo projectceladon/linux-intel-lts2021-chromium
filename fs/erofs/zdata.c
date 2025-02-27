@@ -6,6 +6,7 @@
 #include "zdata.h"
 #include "compress.h"
 #include <linux/prefetch.h>
+#include <linux/psi.h>
 
 #include <trace/events/erofs.h>
 
@@ -46,7 +47,7 @@ static int z_erofs_create_pcluster_pool(void)
 
 	for (pcs = pcluster_pool;
 	     pcs < pcluster_pool + ARRAY_SIZE(pcluster_pool); ++pcs) {
-		size = struct_size(a, compressed_pages, pcs->maxpages);
+		size = struct_size(a, compressed_bvecs, pcs->maxpages);
 
 		sprintf(pcs->name, "erofs_pcluster-%u", pcs->maxpages);
 		pcs->slab = kmem_cache_create(pcs->name, size, 0,
@@ -208,6 +209,7 @@ struct z_erofs_decompress_frontend {
 
 	struct z_erofs_collector clt;
 	struct erofs_map_blocks map;
+    struct page *pagepool;
 
 	bool readahead;
 	/* used for applying cache strategy on the fly */
@@ -241,7 +243,7 @@ static void preload_compressed_pages(struct z_erofs_collector *clt,
 	if (clt->mode < COLLECT_PRIMARY_FOLLOWED)
 		return;
 
-	pages = pcl->compressed_pages;
+	pages = pcl->compressed_bvecs[0].page;
 	index = pcl->obj.index;
 	for (; index < pcl->obj.index + pcl->pclusterpages; ++index, ++pages) {
 		struct page *page;
@@ -305,7 +307,7 @@ int erofs_try_to_free_all_cached_pages(struct erofs_sb_info *sbi,
 	 * therefore no need to worry about available decompression users.
 	 */
 	for (i = 0; i < pcl->pclusterpages; ++i) {
-		struct page *page = pcl->compressed_pages[i];
+		struct page *page = pcl->compressed_bvecs[i].page;
 
 		if (!page)
 			continue;
@@ -318,7 +320,7 @@ int erofs_try_to_free_all_cached_pages(struct erofs_sb_info *sbi,
 			continue;
 
 		/* barrier is implied in the following 'unlock_page' */
-		WRITE_ONCE(pcl->compressed_pages[i], NULL);
+		WRITE_ONCE(pcl->compressed_bvecs[i].page, NULL);
 		detach_page_private(page);
 		unlock_page(page);
 	}
@@ -334,8 +336,8 @@ int erofs_try_to_free_cached_page(struct page *page)
 		unsigned int i;
 
 		for (i = 0; i < pcl->pclusterpages; ++i) {
-			if (pcl->compressed_pages[i] == page) {
-				WRITE_ONCE(pcl->compressed_pages[i], NULL);
+			if (pcl->compressed_bvecs[i].page == page) {
+				WRITE_ONCE(pcl->compressed_bvecs[i].page, NULL);
 				ret = 1;
 				break;
 			}
@@ -354,7 +356,7 @@ static bool z_erofs_try_inplace_io(struct z_erofs_collector *clt,
 {
 	struct z_erofs_pcluster *const pcl = clt->pcl;
 
-	while (clt->icpage_ptr > pcl->compressed_pages)
+	while (clt->icpage_ptr > pcl->compressed_bvecs[0].page)
 		if (!cmpxchg(--clt->icpage_ptr, NULL, page))
 			return true;
 	return false;
@@ -562,7 +564,7 @@ out:
 				  clt->cl->pagevec, clt->cl->vcnt);
 
 	/* since file-backed online pages are traversed in reverse order */
-	clt->icpage_ptr = clt->pcl->compressed_pages + clt->pcl->pclusterpages;
+	clt->icpage_ptr = clt->pcl->compressed_bvecs[0].page + clt->pcl->pclusterpages;
 	return 0;
 }
 
@@ -910,12 +912,12 @@ static int z_erofs_decompress_pcluster(struct super_block *sb,
 	z_erofs_pagevec_ctor_exit(&ctor, true);
 
 	overlapped = false;
-	compressed_pages = pcl->compressed_pages;
+	compressed_pages = pcl->compressed_bvecs[0].page;
 
 	for (i = 0; i < pcl->pclusterpages; ++i) {
 		unsigned int pagenr;
 
-		page = compressed_pages[i];
+		page = compressed_bvecs[i].page;
 
 		/* all compressed pages ought to be valid */
 		DBG_BUGON(!page);
@@ -1077,7 +1079,7 @@ static struct page *pickup_page_for_submission(struct z_erofs_pcluster *pcl,
 	int justfound;
 
 repeat:
-	page = READ_ONCE(pcl->compressed_pages[nr]);
+	page = READ_ONCE(pcl->compressed_bvecs[nr].page);
 	oldpage = page;
 
 	if (!page)
@@ -1093,7 +1095,7 @@ repeat:
 	 * otherwise, it will go inplace I/O path instead.
 	 */
 	if (page->private == Z_EROFS_PREALLOCATED_PAGE) {
-		WRITE_ONCE(pcl->compressed_pages[nr], page);
+		WRITE_ONCE(pcl->compressed_bvecs[nr].page, page);
 		set_page_private(page, 0);
 		tocache = true;
 		goto out_tocache;
@@ -1155,7 +1157,7 @@ repeat:
 	put_page(page);
 out_allocpage:
 	page = erofs_allocpage(pagepool, gfp | __GFP_NOFAIL);
-	if (oldpage != cmpxchg(&pcl->compressed_pages[nr], oldpage, page)) {
+	if (oldpage != cmpxchg(&pcl->compressed_bvecs[nr].page, oldpage, page)) {
 		list_add(&page->lru, pagepool);
 		cond_resched();
 		goto repeat;
@@ -1245,6 +1247,7 @@ static void z_erofs_submit_queue(struct super_block *sb,
 				 bool *force_fg)
 {
 	struct erofs_sb_info *const sbi = EROFS_SB(sb);
+	struct address_space *mc = MNGD_MAPPING(EROFS_SB(sb));
 	z_erofs_next_pcluster_t qtail[NR_JOBQUEUES];
 	struct z_erofs_decompressqueue *q[NR_JOBQUEUES];
 	void *bi_private;
@@ -1254,6 +1257,7 @@ static void z_erofs_submit_queue(struct super_block *sb,
 	struct block_device *last_bdev;
 	unsigned int nr_bios = 0;
 	struct bio *bio = NULL;
+	int memstall = 0;
 
 	bi_private = jobqueueset_init(sb, q, fgq, force_fg);
 	qtail[JQ_BYPASS] = &q[JQ_BYPASS]->head;

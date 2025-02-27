@@ -2495,8 +2495,12 @@ static void bpf_link_defer_dealloc_mult_rcu_gp(struct rcu_head *rcu)
 /* bpf_link_free is guaranteed to be called from process context */
 static void bpf_link_free(struct bpf_link *link)
 {
+	const struct bpf_link_ops *ops = link->ops;
+	bool sleepable = false;
+
 	bpf_link_free_id(link->id);
 	if (link->prog) {
+		sleepable = link->prog->aux->sleepable;
 		/* detach BPF program, clean up used resources */
 		ops->release(link);
 	}
@@ -2509,7 +2513,7 @@ static void bpf_link_free(struct bpf_link *link)
 			call_rcu_tasks_trace(&link->rcu, bpf_link_defer_dealloc_mult_rcu_gp);
 		else
 			call_rcu(&link->rcu, bpf_link_defer_dealloc_rcu_gp);
-	} else if (ops->dealloc) {
+	} else if (link->ops->dealloc) {
 		bpf_link_dealloc(link);
 	}
 }

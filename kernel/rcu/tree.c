@@ -4272,6 +4272,16 @@ static void rcutree_affinity_setting(unsigned int cpu, int outgoing)
 }
 
 /*
+ * Has the specified (known valid) CPU ever been fully online?
+ */
+ bool rcu_cpu_beenfullyonline(int cpu)
+ {
+		 struct rcu_data *rdp = per_cpu_ptr(&rcu_data, cpu);
+ 
+		 return smp_load_acquire(&rdp->beenonline);
+ }
+
+/*
  * Near the end of the CPU-online process.  Pretty much all services
  * enabled, and the CPU is now very much alive.
  */

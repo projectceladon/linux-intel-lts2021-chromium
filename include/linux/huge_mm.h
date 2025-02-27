@@ -4,7 +4,7 @@
 
 #include <linux/sched/coredump.h>
 #include <linux/mm_types.h>
-
+#include <linux/mm.h>
 #include <linux/fs.h> /* only for vma_is_dax() */
 
 vm_fault_t do_huge_pmd_anonymous_page(struct vm_fault *vmf);
@@ -283,6 +283,15 @@ static inline int thp_nr_pages(struct page *page)
 	return 1;
 }
 
+/**
+ * folio_test_pmd_mappable - Can we map this folio with a PMD?
+ * @folio: The folio to test
+ */
+ static inline bool folio_test_pmd_mappable(struct folio *folio)
+ {
+    return folio_order(folio) >= HPAGE_PMD_ORDER;
+ }
+
 struct page *follow_devmap_pmd(struct vm_area_struct *vma, unsigned long addr,
 		pmd_t *pmd, int flags, struct dev_pagemap **pgmap);
 struct page *follow_devmap_pud(struct vm_area_struct *vma, unsigned long addr,
@@ -335,6 +344,11 @@ static inline struct list_head *page_deferred_list(struct page *page)
 #define HPAGE_PUD_SHIFT ({ BUILD_BUG(); 0; })
 #define HPAGE_PUD_MASK ({ BUILD_BUG(); 0; })
 #define HPAGE_PUD_SIZE ({ BUILD_BUG(); 0; })
+
+static inline bool folio_test_pmd_mappable(struct folio *folio)
+{
+	return false;
+}
 
 static inline struct page *thp_head(struct page *page)
 {

@@ -36,6 +36,8 @@ enum mapping_flags {
 	/* writeback related tags are not used */
 	AS_NO_WRITEBACK_TAGS = 5,
 	AS_THP_SUPPORT = 6,	/* THPs supported */
+	AS_STABLE_WRITES,	/* must wait for writeback before modifying
+				   folio contents */
 };
 
 /**
@@ -106,6 +108,11 @@ static inline int mapping_use_writeback_tags(struct address_space *mapping)
 	return !test_bit(AS_NO_WRITEBACK_TAGS, &mapping->flags);
 }
 
+static inline bool mapping_stable_writes(const struct address_space *mapping)
+{
+	return test_bit(AS_STABLE_WRITES, &mapping->flags);
+}
+
 static inline gfp_t mapping_gfp_mask(struct address_space * mapping)
 {
 	return mapping->gfp_mask;
@@ -160,6 +167,8 @@ static inline void filemap_nr_thps_dec(struct address_space *mapping)
 	WARN_ON_ONCE(1);
 #endif
 }
+
+struct address_space *folio_mapping(struct folio *);
 
 void release_pages(struct page **pages, int nr);
 
@@ -298,6 +307,15 @@ static inline void *detach_page_private(struct page *page)
 }
 
 #ifdef CONFIG_NUMA
+struct folio *filemap_alloc_folio(gfp_t gfp, unsigned int order);
+#else
+static inline struct folio *filemap_alloc_folio(gfp_t gfp, unsigned int order)
+{
+	return folio_alloc(gfp, order);
+}
+#endif
+
+#ifdef CONFIG_NUMA
 extern struct page *__page_cache_alloc(gfp_t gfp);
 #else
 static inline struct page *__page_cache_alloc(gfp_t gfp)
@@ -329,9 +347,46 @@ pgoff_t page_cache_prev_miss(struct address_space *mapping,
 #define FGP_FOR_MMAP		0x00000040
 #define FGP_HEAD		0x00000080
 #define FGP_ENTRY		0x00000100
+#define FGP_STABLE		0x00000200
 
+struct folio *__filemap_get_folio(struct address_space *mapping, pgoff_t index,
+	int fgp_flags, gfp_t gfp);
 struct page *pagecache_get_page(struct address_space *mapping, pgoff_t offset,
-		int fgp_flags, gfp_t cache_gfp_mask);
+	int fgp_flags, gfp_t cache_gfp_mask);
+
+/**
+ * filemap_get_folio - Find and get a folio.
+ * @mapping: The address_space to search.
+ * @index: The page index.
+ *
+ * Looks up the page cache entry at @mapping & @index.  If a folio is
+ * present, it is returned with an increased refcount.
+ *
+ * Otherwise, %NULL is returned.
+ */
+ static inline struct folio *filemap_get_folio(struct address_space *mapping,
+	pgoff_t index)
+{
+    return __filemap_get_folio(mapping, index, 0, 0);
+}
+
+/**
+ * filemap_lock_folio - Find and lock a folio.
+ * @mapping: The address_space to search.
+ * @index: The page index.
+ *
+ * Looks up the page cache entry at @mapping & @index.  If a folio is
+ * present, it is returned locked with an increased refcount.
+ *
+ * Context: May sleep.
+ * Return: A folio or %NULL if there is no folio in the cache for this
+ * index.  Will not return a shadow, swap or DAX entry.
+ */
+static inline struct folio *filemap_lock_folio(struct address_space *mapping,
+	pgoff_t index)
+{
+    return __filemap_get_folio(mapping, index, FGP_LOCK, 0);
+}
 
 /**
  * find_get_page - find and get a page reference
@@ -441,6 +496,37 @@ static inline struct page *grab_cache_page_nowait(struct address_space *mapping,
 			mapping_gfp_mask(mapping));
 }
 
+#define swapcache_index(folio)	__page_file_index(&(folio)->page)
+
+/**
+ * folio_index - File index of a folio.
+ * @folio: The folio.
+ *
+ * For a folio which is either in the page cache or the swap cache,
+ * return its index within the address_space it belongs to.  If you know
+ * the page is definitely in the page cache, you can look at the folio's
+ * index directly.
+ *
+ * Return: The index (offset in units of pages) of a folio in its file.
+ */
+static inline pgoff_t folio_index(struct folio *folio)
+{
+    if (unlikely(folio_test_swapcache(folio)))
+        return swapcache_index(folio);
+    return folio->index;
+}
+
+/**
+ * folio_next_index - Get the index of the next folio.
+ * @folio: The current folio.
+ *
+ * Return: The index of the folio which follows this folio in the file.
+ */
+static inline pgoff_t folio_next_index(struct folio *folio)
+{
+	return folio->index + folio_nr_pages(folio);
+}
+
 /* Does this page contain this index? */
 static inline bool thp_contains(struct page *head, pgoff_t index)
 {
@@ -449,6 +535,24 @@ static inline bool thp_contains(struct page *head, pgoff_t index)
 		return head->index == index;
 	return page_index(head) == (index & ~(thp_nr_pages(head) - 1UL));
 }
+
+/**
+ * folio_contains - Does this folio contain this index?
+ * @folio: The folio.
+ * @index: The page index within the file.
+ *
+ * Context: The caller should have the page locked in order to prevent
+ * (eg) shmem from moving the page between the page cache and swap cache
+ * and changing its index in the middle of the operation.
+ * Return: true or false.
+ */
+ static inline bool folio_contains(struct folio *folio, pgoff_t index)
+ {
+	 /* HugeTLBfs indexes the page cache in units of hpage_size */
+	 if (folio_test_hugetlb(folio))
+		 return folio->index == index;
+	 return index - folio_index(folio) < folio_nr_pages(folio);
+ }
 
 /*
  * Given the page we found in the page cache, return the page corresponding
@@ -558,6 +662,15 @@ static inline loff_t page_file_offset(struct page *page)
 	return ((loff_t)page_index(page)) << PAGE_SHIFT;
 }
 
+/**
+ * folio_pos - Returns the byte position of this folio in its file.
+ * @folio: The folio.
+ */
+static inline loff_t folio_pos(struct folio *folio)
+{
+	return page_offset(&folio->page);
+}
+
 extern pgoff_t linear_hugepage_index(struct vm_area_struct *vma,
 				     unsigned long address);
 
@@ -573,13 +686,13 @@ static inline pgoff_t linear_page_index(struct vm_area_struct *vma,
 }
 
 struct wait_page_key {
-	struct page *page;
+	struct folio *folio;
 	int bit_nr;
 	int page_match;
 };
 
 struct wait_page_queue {
-	struct page *page;
+	struct folio *folio;
 	int bit_nr;
 	wait_queue_entry_t wait;
 };
@@ -587,7 +700,7 @@ struct wait_page_queue {
 static inline bool wake_page_match(struct wait_page_queue *wait_page,
 				  struct wait_page_key *key)
 {
-	if (wait_page->page != key->page)
+	if (wait_page->folio != key->folio)
 	       return false;
 	key->page_match = 1;
 
@@ -603,15 +716,67 @@ extern int __lock_page_async(struct page *page, struct wait_page_queue *wait);
 extern int __lock_page_or_retry(struct page *page, struct mm_struct *mm,
 				unsigned int flags);
 extern void unlock_page(struct page *page);
+void __folio_lock(struct folio *folio);
+int __folio_lock_killable(struct folio *folio);
+//vm_fault_t __folio_lock_or_retry(struct folio *folio, struct mm_struct *mm,
+	//unsigned int flags);
+bool __folio_lock_or_retry(struct folio *folio, struct mm_struct *mm,
+		unsigned int flags);
+void folio_unlock(struct folio *folio);
+
+/**
+ * folio_trylock() - Attempt to lock a folio.
+ * @folio: The folio to attempt to lock.
+ *
+ * Sometimes it is undesirable to wait for a folio to be unlocked (eg
+ * when the locks are being taken in the wrong order, or if making
+ * progress through a batch of folios is more important than processing
+ * them in order).  Usually folio_lock() is the correct function to call.
+ *
+ * Context: Any context.
+ * Return: Whether the lock was successfully acquired.
+ */
+ static inline bool folio_trylock(struct folio *folio)
+ {
+		 return likely(!test_and_set_bit_lock(PG_locked, folio_flags(folio, 0)));
+ }
 
 /*
  * Return true if the page was successfully locked
  */
 static inline int trylock_page(struct page *page)
 {
-	page = compound_head(page);
-	return (likely(!test_and_set_bit_lock(PG_locked, &page->flags)));
+    return folio_trylock(page_folio(page));
 }
+
+/**
+ * folio_lock() - Lock this folio.
+ * @folio: The folio to lock.
+ *
+ * The folio lock protects against many things, probably more than it
+ * should.  It is primarily held while a folio is being brought uptodate,
+ * either from its backing file or from swap.  It is also held while a
+ * folio is being truncated from its address_space, so holding the lock
+ * is sufficient to keep folio->mapping stable.
+ *
+ * The folio lock is also held while write() is modifying the page to
+ * provide POSIX atomicity guarantees (as long as the write does not
+ * cross a page boundary).  Other modifications to the data in the folio
+ * do not hold the folio lock and can race with writes, eg DMA and stores
+ * to mapped pages.
+ *
+ * Context: May sleep.  If you need to acquire the locks of two or
+ * more folios, they must be in order of ascending index, if they are
+ * in the same address_space.  If they are in different address_spaces,
+ * acquire the lock of the folio which belongs to the address_space which
+ * has the lowest address in memory first.
+ */
+ static inline void folio_lock(struct folio *folio)
+ {
+		 might_sleep();
+		 if (!folio_trylock(folio))
+				 __folio_lock(folio);
+ }
 
 /*
  * lock_page may only be called if we have the page's inode pinned.
@@ -635,6 +800,27 @@ static inline __sched int lock_page_killable(struct page *page)
 		return __lock_page_killable(page);
 	return 0;
 }
+
+/*
+ * folio_lock_or_retry - Lock the folio, unless this would block and the
+ * caller indicated that it can handle a retry.
+ *
+ * Return value and mmap_lock implications depend on flags; see
+ * __folio_lock_or_retry().
+ */
+ static inline bool folio_lock_or_retry(struct folio *folio,
+	struct mm_struct *mm, unsigned int flags)
+{
+	might_sleep();
+	return folio_trylock(folio) || __folio_lock_or_retry(folio, mm, flags);
+}
+
+/*
+* This is exported only for folio_wait_locked/folio_wait_writeback, etc.,
+* and should not be used directly.
+*/
+void folio_wait_bit(struct folio *folio, int bit_nr);
+int folio_wait_bit_killable(struct folio *folio, int bit_nr);
 
 /*
  * lock_page_async - Lock the page, unless this would block. If the page
@@ -673,6 +859,22 @@ static inline __sched int lock_page_or_retry(struct page *page, struct mm_struct
 extern void wait_on_page_bit(struct page *page, int bit_nr);
 extern int wait_on_page_bit_killable(struct page *page, int bit_nr);
 
+/*static inline void folio_wait_locked(struct folio *folio)
+{
+	if (folio_test_locked(folio))
+		folio_wait_bit(folio, PG_locked);
+}*/
+
+static inline int folio_wait_locked_killable(struct folio *folio)
+{
+
+#if 0
+	if (!folio_test_locked(folio))
+		return 0;
+#endif
+	return folio_wait_bit_killable(folio, PG_locked);
+}
+
 /* 
  * Wait for a page to be unlocked.
  *
@@ -694,11 +896,12 @@ static inline __sched int wait_on_page_locked_killable(struct page *page)
 }
 
 int put_and_wait_on_page_locked(struct page *page, int state);
+void folio_wait_writeback(struct folio *folio);
 void wait_on_page_writeback(struct page *page);
 int wait_on_page_writeback_killable(struct page *page);
 extern void end_page_writeback(struct page *page);
 void wait_for_stable_page(struct page *page);
-
+void folio_wait_stable(struct folio *folio);
 void __set_page_dirty(struct page *, struct address_space *, int warn);
 int __set_page_dirty_nobuffers(struct page *page);
 int __set_page_dirty_no_writeback(struct page *page);

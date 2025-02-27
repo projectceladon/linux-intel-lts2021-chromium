@@ -562,6 +562,7 @@ static void __update_extent_tree_range(struct inode *inode,
 	struct extent_node *prev_en = NULL, *next_en = NULL;
 	struct extent_info ei, dei, prev;
 	struct rb_node **insert_p = NULL, *insert_parent = NULL;
+	unsigned int fofs = tei->fofs, len = tei->len;
 	unsigned int end = fofs + len;
 	unsigned int pos = (unsigned int)fofs;
 	bool updated = false;
@@ -569,8 +570,8 @@ static void __update_extent_tree_range(struct inode *inode,
 
 	if (!et)
 		return;
-
-	trace_f2fs_update_extent_tree_range(inode, fofs, blkaddr, len);
+	if (type == EX_READ)
+	    trace_f2fs_update_extent_tree_range(inode, fofs, tei->blk, len);
 
 	write_lock(&et->lock);
 

@@ -1540,6 +1540,11 @@ static inline int bdev_discard_alignment(struct block_device *bdev)
 	return q->limits.discard_alignment;
 }
 
+static inline unsigned int bdev_max_discard_sectors(struct block_device *bdev)
+{
+	return bdev_get_queue(bdev)->limits.max_discard_sectors;
+}
+
 static inline unsigned int bdev_write_same(struct block_device *bdev)
 {
 	struct request_queue *q = bdev_get_queue(bdev);

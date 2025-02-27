@@ -142,19 +142,13 @@ MODULE_ALIAS("ext3");
 
 
 static inline void __ext4_read_bh(struct buffer_head *bh, blk_opf_t op_flags,
-				  bh_end_io_t *end_io, bool simu_fail)
+	bh_end_io_t *end_io)
 {
-	if (simu_fail) {
-		clear_buffer_uptodate(bh);
-		unlock_buffer(bh);
-		return;
-	}
-
 	/*
-	 * buffer's verified bit is no longer valid after reading from
-	 * disk again due to write out error, clear it to make sure we
-	 * recheck the buffer contents.
-	 */
+	* buffer's verified bit is no longer valid after reading from
+	* disk again due to write out error, clear it to make sure we
+	* recheck the buffer contents.
+	*/
 	clear_buffer_verified(bh);
 
 	bh->b_end_io = end_io ? end_io : end_buffer_read_sync;
@@ -174,8 +168,7 @@ void ext4_read_bh_nowait(struct buffer_head *bh, blk_opf_t op_flags,
 	__ext4_read_bh(bh, op_flags, end_io, simu_fail);
 }
 
-int ext4_read_bh(struct buffer_head *bh, blk_opf_t op_flags,
-		 bh_end_io_t *end_io, bool simu_fail)
+int ext4_read_bh(struct buffer_head *bh, blk_opf_t op_flags, bh_end_io_t *end_io)
 {
 	BUG_ON(!buffer_locked(bh));
 
@@ -184,7 +177,7 @@ int ext4_read_bh(struct buffer_head *bh, blk_opf_t op_flags,
 		return 0;
 	}
 
-	__ext4_read_bh(bh, op_flags, end_io, simu_fail);
+	__ext4_read_bh(bh, op_flags, end_io);
 
 	wait_on_buffer(bh);
 	if (buffer_uptodate(bh))

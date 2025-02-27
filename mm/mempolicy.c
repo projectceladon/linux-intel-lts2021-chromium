@@ -2063,6 +2063,158 @@ static struct page *alloc_pages_preferred_many(gfp_t gfp, unsigned int order,
 }
 
 /**
+ * vma_alloc_folio - Allocate a folio for a VMA.
+ * @gfp: GFP flags.
+ * @order: Order of the folio.
+ * @vma: Pointer to VMA or NULL if not available.
+ * @addr: Virtual address of the allocation.  Must be inside @vma.
+ * @hugepage: For hugepages try only the preferred node if possible.
+ *
+ * Allocate a folio for a specific address in @vma, using the appropriate
+ * NUMA policy.  When @vma is not NULL the caller must hold the mmap_lock
+ * of the mm_struct of the VMA to prevent it from going away.  Should be
+ * used for all allocations for folios that will be mapped into user space.
+ *
+ * Return: The folio on success or NULL if allocation fails.
+ */
+ struct folio *vma_alloc_folio(gfp_t gfp, int order, struct vm_area_struct *vma,
+	unsigned long addr, bool hugepage)
+{
+	struct mempolicy *pol;
+	int node = numa_node_id();
+	struct folio *folio;
+	int preferred_nid;
+	nodemask_t *nmask;
+
+	pol = get_vma_policy(vma, addr);
+
+	if (pol->mode == MPOL_INTERLEAVE) {
+		struct page *page;
+		unsigned nid;
+
+		nid = interleave_nid(pol, vma, addr, PAGE_SHIFT + order);
+		mpol_cond_put(pol);
+		gfp |= __GFP_COMP;
+		page = alloc_page_interleave(gfp, order, nid);
+		if (page && order > 1)
+			prep_transhuge_page(page);
+		folio = (struct folio *)page;
+		goto out;
+	}
+
+	if (pol->mode == MPOL_PREFERRED_MANY) {
+		struct page *page;
+
+		node = policy_node(gfp, pol, node);
+		gfp |= __GFP_COMP;
+		page = alloc_pages_preferred_many(gfp, order, node, pol);
+		mpol_cond_put(pol);
+		if (page && order > 1)
+			prep_transhuge_page(page);
+		folio = (struct folio *)page;
+		goto out;
+	}
+
+	if (unlikely(IS_ENABLED(CONFIG_TRANSPARENT_HUGEPAGE) && hugepage)) {
+		int hpage_node = node;
+
+		/*
+		* For hugepage allocation and non-interleave policy which
+		* allows the current node (or other explicitly preferred
+		* node) we only try to allocate from the current/preferred
+		* node and don't fall back to other nodes, as the cost of
+		* remote accesses would likely offset THP benefits.
+		*
+		* If the policy is interleave or does not allow the current
+		* node in its nodemask, we allocate the standard way.
+		*/
+		if (pol->mode == MPOL_PREFERRED)
+			hpage_node = first_node(pol->nodes);
+
+		nmask = policy_nodemask(gfp, pol);
+		if (!nmask || node_isset(hpage_node, *nmask)) {
+			mpol_cond_put(pol);
+			/*
+			* First, try to allocate THP only on local node, but
+			* don't reclaim unnecessarily, just compact.
+			*/
+			folio = __folio_alloc_node(gfp | __GFP_THISNODE |
+					__GFP_NORETRY, order, hpage_node);
+
+			/*
+			* If hugepage allocations are configured to always
+			* synchronous compact or the vma has been madvised
+			* to prefer hugepage backing, retry allowing remote
+			* memory with both reclaim and compact as well.
+			*/
+			if (!folio && (gfp & __GFP_DIRECT_RECLAIM))
+				folio = __folio_alloc(gfp, order, hpage_node,
+							nmask);
+
+			goto out;
+		}
+	}
+
+	nmask = policy_nodemask(gfp, pol);
+	preferred_nid = policy_node(gfp, pol, node);
+	folio = __folio_alloc(gfp, order, preferred_nid, nmask);
+	mpol_cond_put(pol);
+	out:
+	return folio;
+}
+EXPORT_SYMBOL(vma_alloc_folio);
+
+/**
+* alloc_pages - Allocate pages.
+* @gfp: GFP flags.
+* @order: Power of two of number of pages to allocate.
+*
+* Allocate 1 << @order contiguous pages.  The physical address of the
+* first page is naturally aligned (eg an order-3 allocation will be aligned
+* to a multiple of 8 * PAGE_SIZE bytes).  The NUMA policy of the current
+* process is honoured when in process context.
+*
+* Context: Can be called from any context, providing the appropriate GFP
+* flags are used.
+* Return: The page on success or NULL if allocation fails.
+*/
+struct page *alloc_pages(gfp_t gfp, unsigned order)
+{
+	struct mempolicy *pol = &default_policy;
+	struct page *page;
+
+	if (!in_interrupt() && !(gfp & __GFP_THISNODE))
+		pol = get_task_policy(current);
+
+	/*
+	* No reference counting needed for current->mempolicy
+	* nor system default_policy
+	*/
+	if (pol->mode == MPOL_INTERLEAVE)
+		page = alloc_page_interleave(gfp, order, interleave_nodes(pol));
+	else if (pol->mode == MPOL_PREFERRED_MANY)
+		page = alloc_pages_preferred_many(gfp, order,
+				policy_node(gfp, pol, numa_node_id()), pol);
+	else
+		page = __alloc_pages(gfp, order,
+				policy_node(gfp, pol, numa_node_id()),
+				policy_nodemask(gfp, pol));
+
+	return page;
+}
+EXPORT_SYMBOL(alloc_pages);
+
+struct folio *folio_alloc(gfp_t gfp, unsigned order)
+{
+	struct page *page = alloc_pages(gfp | __GFP_COMP, order);
+
+	if (page && order > 1)
+		prep_transhuge_page(page);
+	return (struct folio *)page;
+}
+EXPORT_SYMBOL(folio_alloc);
+
+/**
  * alloc_pages_vma - Allocate a page for a VMA.
  * @gfp: GFP flags.
  * @order: Order of the GFP allocation.

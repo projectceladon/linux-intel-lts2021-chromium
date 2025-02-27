@@ -157,6 +157,8 @@ struct f2fs_mount_info {
 	int fsync_mode;			/* fsync policy */
 	int fs_mode;			/* fs mode: LFS or ADAPTIVE */
 	int bggc_mode;			/* bggc mode: off, on or sync */
+	int memory_mode;                /* memory mode */
+	int errors;                     /* errors parameter */
 	int discard_unit;		/*
 					 * discard command's offset/size should
 					 * be aligned to this unit: block,
@@ -582,8 +584,8 @@ enum {
 /* maximum retry quota flush count */
 #define DEFAULT_RETRY_QUOTA_FLUSH_COUNT		8
 
-/* maximum retry of EIO'ed meta page */
-#define MAX_RETRY_META_PAGE_EIO			100
+/* maximum retry of EIO'ed page */
+#define MAX_RETRY_PAGE_EIO                      100
 
 #define F2FS_LINK_MAX	0xffffffff	/* maximum link count per file */
 
@@ -600,6 +602,31 @@ enum {
 
 #define RECOVERY_MAX_RA_BLOCKS		BIO_MAX_VECS
 #define RECOVERY_MIN_RA_BLOCKS		1
+
+#define F2FS_ONSTACK_PAGES	16	/* nr of onstack pages */
+
+/* for in-memory extent cache entry */
+#define F2FS_MIN_EXTENT_LEN	64	/* minimum extent length */
+
+/* number of extent info in extent cache we try to shrink */
+#define READ_EXTENT_CACHE_SHRINK_NUMBER	128
+/* number of age extent info in extent cache we try to shrink */
+#define AGE_EXTENT_CACHE_SHRINK_NUMBER  128
+#define LAST_AGE_WEIGHT                 30
+#define SAME_AGE_REGION                 1024
+
+/*
+ * Define data block with age less than 1GB as hot data
+ * define data block with age less than 10GB but more than 1GB as warm data
+ */
+#define DEF_HOT_DATA_AGE_THRESHOLD      262144
+#define DEF_WARM_DATA_AGE_THRESHOLD     2621440
+
+/* extent cache type */
+enum extent_type {
+	EX_READ,
+	NR_EXTENT_CACHES,
+};
 
 struct rb_entry {
 	struct rb_node rb_node;		/* rb node located in rb-tree */
@@ -1367,10 +1394,29 @@ enum {
 };
 
 enum {
-	DISCARD_UNIT_BLOCK,	/* basic discard unit is block */
-	DISCARD_UNIT_SEGMENT,	/* basic discard unit is segment */
-	DISCARD_UNIT_SECTION,	/* basic discard unit is section */
+	DISCARD_UNIT_BLOCK,     /* basic discard unit is block */
+	DISCARD_UNIT_SEGMENT,   /* basic discard unit is segment */
+	DISCARD_UNIT_SECTION,   /* basic discard unit is section */
 };
+
+enum {
+	MEMORY_MODE_NORMAL,     /* memory mode for normal devices */
+	MEMORY_MODE_LOW,        /* memory mode for low memry devices */
+};
+
+enum errors_option {
+	MOUNT_ERRORS_READONLY,  /* remount fs ro on errors */
+	MOUNT_ERRORS_CONTINUE,  /* continue on errors */
+	MOUNT_ERRORS_PANIC,     /* panic on errors */
+};
+
+enum {
+	BACKGROUND,
+	FOREGROUND,
+	MAX_CALL_TYPE,
+	TOTAL_CALL = FOREGROUND,
+};
+
 
 static inline int f2fs_test_bit(unsigned int nr, char *addr);
 static inline void f2fs_set_bit(unsigned int nr, char *addr);
@@ -1625,6 +1671,8 @@ struct f2fs_sb_info {
 	/* keep migration IO order for LFS mode */
 	struct f2fs_rwsem io_order_lock;
 	mempool_t *write_io_dummy;		/* Dummy pages */
+	pgoff_t page_eio_ofs[NR_PAGE_TYPE];     /* EIO page offset */
+	int page_eio_cnt[NR_PAGE_TYPE];         /* EIO count */
 	pgoff_t metapage_eio_ofs;		/* EIO page offset */
 	int metapage_eio_cnt;			/* EIO count */
 
@@ -1807,7 +1855,11 @@ struct f2fs_sb_info {
 	__u32 s_chksum_seed;
 
 	struct workqueue_struct *post_read_wq;	/* post read workqueue */
-
+	struct work_struct s_error_work;
+	unsigned char errors[MAX_F2FS_ERRORS];	/* error flags */
+	unsigned char stop_reason[MAX_STOP_REASON];     /* stop reason */
+    spinlock_t error_lock;			/* protect errors array */
+	bool error_dirty;			/* errors of sb is dirty */
 	struct kmem_cache *inline_xattr_slab;	/* inline xattr entry */
 	unsigned int inline_xattr_slab_size;	/* default inline xattr slab size */
 

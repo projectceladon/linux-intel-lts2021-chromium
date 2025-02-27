@@ -312,6 +312,37 @@ struct z_erofs_map_header {
 	__u8	h_clusterbits;
 };
 
+/*
+ * On-disk logical cluster type:
+ *    0   - literal (uncompressed) lcluster
+ *    1,3 - compressed lcluster (for HEAD lclusters)
+ *    2   - compressed lcluster (for NONHEAD lclusters)
+ *
+ * In detail,
+ *    0 - literal (uncompressed) lcluster,
+ *        di_advise = 0
+ *        di_clusterofs = the literal data offset of the lcluster
+ *        di_blkaddr = the blkaddr of the literal pcluster
+ *
+ *    1,3 - compressed lcluster (for HEAD lclusters)
+ *        di_advise = 1 or 3
+ *        di_clusterofs = the decompressed data offset of the lcluster
+ *        di_blkaddr = the blkaddr of the compressed pcluster
+ *
+ *    2 - compressed lcluster (for NONHEAD lclusters)
+ *        di_advise = 2
+ *        di_clusterofs =
+ *           the decompressed data offset in its own HEAD lcluster
+ *        di_u.delta[0] = distance to this HEAD lcluster
+ *        di_u.delta[1] = distance to the next HEAD lcluster
+ */
+ enum {
+	Z_EROFS_LCLUSTER_TYPE_PLAIN     = 0,
+	Z_EROFS_LCLUSTER_TYPE_HEAD1     = 1,
+	Z_EROFS_LCLUSTER_TYPE_NONHEAD   = 2,
+	Z_EROFS_LCLUSTER_TYPE_HEAD2     = 3,
+};
+
 #define Z_EROFS_VLE_LEGACY_HEADER_PADDING       8
 
 /*

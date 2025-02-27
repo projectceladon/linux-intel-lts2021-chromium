@@ -541,6 +541,10 @@ static inline void arch_free_page(struct page *page, int order) { }
 #ifndef HAVE_ARCH_ALLOC_PAGE
 static inline void arch_alloc_page(struct page *page, int order) { }
 #endif
+struct page *__alloc_pages(gfp_t gfp, unsigned int order, int preferred_nid,
+	nodemask_t *nodemask);
+struct folio *__folio_alloc(gfp_t gfp, unsigned int order, int preferred_nid,
+	nodemask_t *nodemask);
 #ifndef HAVE_ARCH_MAKE_PAGE_ACCESSIBLE
 static inline int arch_make_page_accessible(struct page *page)
 {
@@ -578,6 +582,20 @@ alloc_pages_bulk_array_node(gfp_t gfp, int nid, unsigned long nr_pages, struct p
 	return __alloc_pages_bulk(gfp, nid, NULL, nr_pages, NULL, page_array);
 }
 
+static inline void warn_if_node_offline(int this_node, gfp_t gfp_mask)
+{
+	gfp_t warn_gfp = gfp_mask & (__GFP_THISNODE|__GFP_NOWARN);
+
+	if (warn_gfp != (__GFP_THISNODE|__GFP_NOWARN))
+		return;
+
+	if (node_online(this_node))
+		return;
+
+	pr_warn("%pGg allocation from offline node %d\n", &gfp_mask, this_node);
+	dump_stack();
+}
+
 /*
  * Allocate pages, preferring the node given as nid. The node must be valid and
  * online. For more general interface, see alloc_pages_node().
@@ -589,6 +607,15 @@ __alloc_pages_node(int nid, gfp_t gfp_mask, unsigned int order)
 	VM_WARN_ON((gfp_mask & __GFP_THISNODE) && !node_online(nid));
 
 	return __alloc_pages(gfp_mask, order, nid, NULL);
+}
+
+static inline
+struct folio *__folio_alloc_node(gfp_t gfp, unsigned int order, int nid)
+{
+	VM_BUG_ON(nid < 0 || nid >= MAX_NUMNODES);
+	warn_if_node_offline(nid, gfp);
+
+	return __folio_alloc(gfp, order, nid, NULL);
 }
 
 /*
@@ -607,6 +634,9 @@ static inline struct page *alloc_pages_node(int nid, gfp_t gfp_mask,
 
 #ifdef CONFIG_NUMA
 struct page *alloc_pages(gfp_t gfp, unsigned int order);
+struct folio *folio_alloc(gfp_t gfp, unsigned order);
+struct folio *vma_alloc_folio(gfp_t gfp, int order, struct vm_area_struct *vma,
+	unsigned long addr, bool hugepage);
 extern struct page *alloc_pages_vma(gfp_t gfp_mask, int order,
 			struct vm_area_struct *vma, unsigned long addr,
 			int node, bool hugepage);
@@ -617,11 +647,18 @@ static inline struct page *alloc_pages(gfp_t gfp_mask, unsigned int order)
 {
 	return alloc_pages_node(numa_node_id(), gfp_mask, order);
 }
+static inline struct folio *folio_alloc(gfp_t gfp, unsigned int order)
+{
+	return __folio_alloc_node(gfp, order, numa_node_id());
+}
+#define vma_alloc_folio(gfp, order, vma, addr, hugepage)		\
+	folio_alloc(gfp, order)
 #define alloc_pages_vma(gfp_mask, order, vma, addr, node, false)\
 	alloc_pages(gfp_mask, order)
 #define alloc_hugepage_vma(gfp_mask, vma, addr, order) \
 	alloc_pages(gfp_mask, order)
 #endif
+
 #define alloc_page(gfp_mask) alloc_pages(gfp_mask, 0)
 #define alloc_page_vma(gfp_mask, vma, addr)			\
 	alloc_pages_vma(gfp_mask, 0, vma, addr, numa_node_id(), false)

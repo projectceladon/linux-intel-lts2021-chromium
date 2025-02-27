@@ -2942,3 +2942,44 @@ void wait_for_stable_page(struct page *page)
 		wait_on_page_writeback(page);
 }
 EXPORT_SYMBOL_GPL(wait_for_stable_page);
+
+/**
+ * folio_wait_stable() - wait for writeback to finish, if necessary.
+ * @folio: The folio to wait on.
+ *
+ * This function determines if the given folio is related to a backing
+ * device that requires folio contents to be held stable during writeback.
+ * If so, then it will wait for any pending writeback to complete.
+ *
+ * Context: Sleeps.  Must be called in process context and with
+ * no spinlocks held.  Caller should hold a reference on the folio.
+ * If the folio is not locked, writeback may start again after writeback
+ * has finished.
+ */
+ void folio_wait_stable(struct folio *folio)
+ {
+	 if (mapping_stable_writes(folio_mapping(folio)))
+		 folio_wait_writeback(folio);
+ }
+ EXPORT_SYMBOL_GPL(folio_wait_stable);
+
+ /**
+ * folio_wait_writeback - Wait for a folio to finish writeback.
+ * @folio: The folio to wait for.
+ *
+ * If the folio is currently being written back to storage, wait for the
+ * I/O to complete.
+ *
+ * Context: Sleeps.  Must be called in process context and with
+ * no spinlocks held.  Caller should hold a reference on the folio.
+ * If the folio is not locked, writeback may start again after writeback
+ * has finished.
+ */
+void folio_wait_writeback(struct folio *folio)
+{
+	while (folio_test_writeback(folio)) {
+		trace_folio_wait_writeback(folio, folio_mapping(folio));
+		folio_wait_bit(folio, PG_writeback);
+	}
+}
+EXPORT_SYMBOL_GPL(folio_wait_writeback);

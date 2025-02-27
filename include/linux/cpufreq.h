@@ -20,6 +20,7 @@
 #include <linux/pm_qos.h>
 #include <linux/spinlock.h>
 #include <linux/sysfs.h>
+#include <linux/cleanup.h>
 
 /*********************************************************************
  *                        CPUFREQ INTERFACE                          *
@@ -117,6 +118,13 @@ struct cpufreq_policy {
 	 * governor.
 	 */
 	bool			strict_target;
+
+	/*
+     * Set if inefficient frequencies were found in the frequency table.
+     * This indicates if the relation flag CPUFREQ_RELATION_E can be
+     * honored.
+     */
+    bool                    efficiencies_available;
 
 	/*
 	 * Preferred average time interval between consecutive invocations of
@@ -669,6 +677,7 @@ struct governor_attr {
 #define CPUFREQ_TABLE_END	~1u
 /* Special Values of .flags field */
 #define CPUFREQ_BOOST_FREQ	(1 << 0)
+#define CPUFREQ_INEFFICIENT_FREQ        (1 << 1)
 
 struct cpufreq_frequency_table {
 	unsigned int	flags;
@@ -1039,31 +1048,33 @@ cpufreq_table_set_inefficient(struct cpufreq_policy *policy,
         return -EINVAL;
 }
 
-
 static inline int parse_perf_domain(int cpu, const char *list_name,
 				    const char *cell_name,
 				    struct of_phandle_args *args)
 {
 	int ret;
 
-	struct device_node *cpu_np __free(device_node) = of_cpu_device_node_get(cpu);
+	struct device_node *cpu_np = of_cpu_device_node_get(cpu);
 	if (!cpu_np)
 		return -ENODEV;
 
 	ret = of_parse_phandle_with_args(cpu_np, list_name, cell_name, 0,
 					 args);
+	of_node_put(cpu_np);
 	if (ret < 0)
 		return ret;
 	return 0;
 }
 
 static inline int of_perf_domain_get_sharing_cpumask(int pcpu, const char *list_name,
-						     const char *cell_name, struct cpumask *cpumask)
+						     const char *cell_name, struct cpumask *cpumask,
+							 struct of_phandle_args *pargs)
 {
 	int target_idx;
 	int cpu, ret;
+	
 
-	ret = parse_perf_domain(pcpu, list_name, cell_name);
+	ret = parse_perf_domain(pcpu, list_name, cell_name, pargs);
 	if (ret < 0)
 		return ret;
 
@@ -1074,7 +1085,7 @@ static inline int of_perf_domain_get_sharing_cpumask(int pcpu, const char *list_
 		if (cpu == pcpu)
 			continue;
 
-		ret = parse_perf_domain(cpu, list_name, cell_name);
+		ret = parse_perf_domain(cpu, list_name, cell_name, pargs);
 		if (ret < 0)
 			continue;
 

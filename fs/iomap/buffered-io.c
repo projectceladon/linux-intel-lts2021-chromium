@@ -853,7 +853,7 @@ static int iomap_write_delalloc_scan(struct inode *inode,
 		}
 
 		/* if dirty, punch up to offset */
-		if (folio_test_dirty(folio)) {
+//		if (folio_test_dirty(folio)) {
 			if (start_byte > *punch_start_byte) {
 				int	error;
 
@@ -872,7 +872,7 @@ static int iomap_write_delalloc_scan(struct inode *inode,
 			 */
 			*punch_start_byte = min_t(loff_t, end_byte,
 					folio_next_index(folio) << PAGE_SHIFT);
-		}
+//		}
 
 		/* move offset to start of next folio in range */
 		start_byte = folio_pos(folio) + folio_size(folio);

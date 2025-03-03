@@ -462,8 +462,7 @@ static void int3400_setup_gddv(struct int3400_thermal_priv *priv)
 	obj = buffer.pointer;
 	if (obj->type != ACPI_TYPE_PACKAGE || obj->package.count != 1
 	    || obj->package.elements[0].type != ACPI_TYPE_BUFFER) {
-		kfree(buffer.pointer);
-		return;
+		goto out_free;
 	}
 
 	priv->data_vault = kmemdup(obj->package.elements[0].buffer.pointer,
@@ -474,6 +473,7 @@ static void int3400_setup_gddv(struct int3400_thermal_priv *priv)
 
 	bin_attr_data_vault.private = priv->data_vault;
 	bin_attr_data_vault.size = obj->package.elements[0].buffer.length;
+out_free:
 	kfree(buffer.pointer);
 }
 

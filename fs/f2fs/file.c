@@ -2754,6 +2754,10 @@ out:
 	inode_unlock(inode);
 	if (!err)
 		range->len = (u64)total << PAGE_SHIFT;
+unlock_out:
+	inode_unlock(inode);
+	if (!err)
+		range->len = (u64)total << PAGE_SHIFT;
 	return err;
 }
 

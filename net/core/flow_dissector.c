@@ -33,6 +33,7 @@
 #include <net/netfilter/nf_conntrack_labels.h>
 #endif
 #include <linux/bpf-netns.h>
+#include <net/net_debug.h>
 
 static void dissector_set_key(struct flow_dissector *flow_dissector,
 			      enum flow_dissector_key_id key_id)

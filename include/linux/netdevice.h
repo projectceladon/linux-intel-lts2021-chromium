@@ -4527,6 +4527,14 @@ static inline void txq_trans_update(struct netdev_queue *txq)
 		txq->trans_start = jiffies;
 }
 
+static inline void txq_trans_cond_update(struct netdev_queue *txq)
+{
+	unsigned long now = jiffies;
+
+	if (READ_ONCE(txq->trans_start) != now)
+		WRITE_ONCE(txq->trans_start, now);
+}
+
 /* legacy drivers only, netdev_start_xmit() sets txq->trans_start */
 static inline void netif_trans_update(struct net_device *dev)
 {

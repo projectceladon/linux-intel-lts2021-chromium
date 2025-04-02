@@ -304,15 +304,12 @@ static int tcf_mirred_act(struct sk_buff *skb, const struct tc_action *a,
 	/* mirror is always swallowed */
 	if (is_redirect) {
 		skb_set_redirected(skb2, skb2->tc_at_ingress);
-
-		skb_set_redirected(skb_to_send, skb_to_send->tc_at_ingress);
-
-		err = tcf_mirred_forward(at_ingress, want_ingress, skb_to_send);
+		err = tcf_mirred_forward(at_ingress, want_ingress, skb2);
 	} else {
-		err = tcf_mirred_forward(at_ingress, want_ingress, skb_to_send);
+		err = tcf_mirred_forward(at_ingress, want_ingress, skb2);
 	}
 
-	err = tcf_mirred_forward(want_ingress, skb2);
+	err = tcf_mirred_forward(at_ingress, want_ingress, skb2);
 	if (err) {
 out:
 		tcf_action_inc_overlimit_qstats(&m->common);

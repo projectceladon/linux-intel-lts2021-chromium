@@ -3868,6 +3868,69 @@ int f2fs_commit_super(struct f2fs_sb_info *sbi, bool recover)
 	return err;
 }
 
+void f2fs_save_errors(struct f2fs_sb_info *sbi, unsigned char flag)
+{
+        unsigned long flags;
+
+        spin_lock_irqsave(&sbi->error_lock, flags);
+        if (!test_bit(flag, (unsigned long *)sbi->errors)) {
+                set_bit(flag, (unsigned long *)sbi->errors);
+                sbi->error_dirty = true;
+        }
+        spin_unlock_irqrestore(&sbi->error_lock, flags);
+}
+
+static bool f2fs_update_errors(struct f2fs_sb_info *sbi)
+{
+        unsigned long flags;
+        bool need_update = false;
+
+        spin_lock_irqsave(&sbi->error_lock, flags);
+        if (sbi->error_dirty) {
+                memcpy(F2FS_RAW_SUPER(sbi)->s_errors, sbi->errors,
+                                                        MAX_F2FS_ERRORS);
+                sbi->error_dirty = false;
+                need_update = true;
+        }
+        spin_unlock_irqrestore(&sbi->error_lock, flags);
+
+        return need_update;
+}
+
+static void f2fs_record_errors(struct f2fs_sb_info *sbi, unsigned char error)
+{
+        int err;
+
+        f2fs_down_write(&sbi->sb_lock);
+
+        if (!f2fs_update_errors(sbi))
+                goto out_unlock;
+
+        err = f2fs_commit_super(sbi, false);
+        if (err)
+                f2fs_err(sbi, "f2fs_commit_super fails to record errors:%u, err:%d",
+                                                                error, err);
+out_unlock:
+        f2fs_up_write(&sbi->sb_lock);
+}
+
+void f2fs_handle_error(struct f2fs_sb_info *sbi, unsigned char error)
+{
+        f2fs_save_errors(sbi, error);
+        f2fs_record_errors(sbi, error);
+}
+
+void f2fs_handle_error_async(struct f2fs_sb_info *sbi, unsigned char error)
+{
+        f2fs_save_errors(sbi, error);
+
+        if (!sbi->error_dirty)
+                return;
+        if (!test_bit(error, (unsigned long *)sbi->errors))
+                return;
+        schedule_work(&sbi->s_error_work);
+}
+
 static int f2fs_scan_devices(struct f2fs_sb_info *sbi)
 {
 	struct f2fs_super_block *raw_super = F2FS_RAW_SUPER(sbi);

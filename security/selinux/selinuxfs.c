@@ -2209,6 +2209,7 @@ static struct file_system_type sel_fs_type = {
 	.kill_sb	= sel_kill_sb,
 };
 
+static struct vfsmount *selinuxfs_mount __ro_after_init;
 struct path selinux_null __ro_after_init;
 
 static int __init init_sel_fs(void)
@@ -2230,11 +2231,11 @@ static int __init init_sel_fs(void)
 		return err;
 	}
 
-	selinux_null.mnt = kern_mount(&sel_fs_type);
+	selinux_null.mnt = selinuxfs_mount = kern_mount(&sel_fs_type);
 	if (IS_ERR(selinux_null.mnt)) {
 		pr_err("selinuxfs:  could not mount!\n");
 		err = PTR_ERR(selinux_null.mnt);
-		selinux_null.mnt = NULL;
+		selinux_null.mnt = selinuxfs_mount = NULL;
 		return err;
 	}
 

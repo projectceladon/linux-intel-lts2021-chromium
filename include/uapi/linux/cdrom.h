@@ -295,6 +295,23 @@ struct cdrom_generic_command
 	};
 };
 
+/* This struct is used by CDROM_TIMED_MEDIA_CHANGE */
+struct cdrom_timed_media_change_info {
+        __s64   last_media_change;      /* Timestamp of the last detected media
+                                         * change in ms. May be set by caller,
+                                         * updated upon successful return of
+                                         * ioctl.
+                                         */
+        __u64   media_flags;            /* Flags returned by ioctl to indicate
+                                         * media status.
+                                         */
+};
+#define MEDIA_CHANGED_FLAG      0x1     /* Last detected media change was more
+                                         * recent than last_media_change set by
+                                         * caller.
+                                         */
+/* other bits of media_flags available for future use */
+
 /*
  * A CD-ROM physical sector size is 2048, 2052, 2056, 2324, 2332, 2336, 
  * 2340, or 2352 bytes long.  

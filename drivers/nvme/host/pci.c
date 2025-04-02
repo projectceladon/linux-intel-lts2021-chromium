@@ -2863,11 +2863,6 @@ static void nvme_reset_work(struct work_struct *work)
 		nvme_unquiesce_io_queues(&dev->ctrl);
 		nvme_remove_namespaces(&dev->ctrl);
 		nvme_free_tagset(dev);
-	} else {
-		nvme_start_queues(&dev->ctrl);
-		nvme_wait_freeze(&dev->ctrl);
-		nvme_dev_add(dev);
-		nvme_unfreeze(&dev->ctrl);
 	}
 
 	/*

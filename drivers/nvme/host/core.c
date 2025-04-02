@@ -4746,6 +4746,20 @@ out:
 }
 EXPORT_SYMBOL_GPL(nvme_init_ctrl);
 
+/* let I/O to all namespaces fail in preparation for surprise removal */
+void nvme_mark_namespaces_dead(struct nvme_ctrl *ctrl)
+{
+	struct nvme_ns *ns;
+	int srcu_idx;
+
+	srcu_idx = srcu_read_lock(&ctrl->srcu);
+	list_for_each_entry_srcu(ns, &ctrl->namespaces, list,
+				 srcu_read_lock_held(&ctrl->srcu))
+		blk_mark_disk_dead(ns->disk);
+	srcu_read_unlock(&ctrl->srcu, srcu_idx);
+}
+EXPORT_SYMBOL_GPL(nvme_mark_namespaces_dead);
+
 /**
  * nvme_kill_queues(): Ends all namespace queues
  * @ctrl: the dead controller that needs to end
@@ -4817,6 +4831,15 @@ void nvme_start_freeze(struct nvme_ctrl *ctrl)
 	up_read(&ctrl->namespaces_rwsem);
 }
 EXPORT_SYMBOL_GPL(nvme_start_freeze);
+
+void nvme_unquiesce_io_queues(struct nvme_ctrl *ctrl)
+{
+	if (!ctrl->tagset)
+		return;
+	if (test_and_clear_bit(NVME_CTRL_STOPPED, &ctrl->flags))
+		blk_mq_unquiesce_tagset(ctrl->tagset);
+}
+EXPORT_SYMBOL_GPL(nvme_unquiesce_io_queues);
 
 void nvme_stop_queues(struct nvme_ctrl *ctrl)
 {

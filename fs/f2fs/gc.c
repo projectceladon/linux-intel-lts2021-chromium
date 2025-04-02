@@ -646,6 +646,54 @@ static void release_victim_entry(struct f2fs_sb_info *sbi)
 	f2fs_bug_on(sbi, !list_empty(&am->victim_list));
 }
 
+static bool f2fs_pin_section(struct f2fs_sb_info *sbi, unsigned int segno)
+{
+        struct dirty_seglist_info *dirty_i = DIRTY_I(sbi);
+        unsigned int secno = GET_SEC_FROM_SEG(sbi, segno);
+
+        if (!dirty_i->enable_pin_section)
+                return false;
+        if (!test_and_set_bit(secno, dirty_i->pinned_secmap))
+                dirty_i->pinned_secmap_cnt++;
+        return true;
+}
+
+static bool f2fs_pinned_section_exists(struct dirty_seglist_info *dirty_i)
+{
+        return dirty_i->pinned_secmap_cnt;
+}
+
+static bool f2fs_section_is_pinned(struct dirty_seglist_info *dirty_i,
+                                                unsigned int secno)
+{
+        return dirty_i->enable_pin_section &&
+                f2fs_pinned_section_exists(dirty_i) &&
+                test_bit(secno, dirty_i->pinned_secmap);
+}
+
+static void f2fs_unpin_all_sections(struct f2fs_sb_info *sbi, bool enable)
+{
+        unsigned int bitmap_size = f2fs_bitmap_size(MAIN_SECS(sbi));
+
+        if (f2fs_pinned_section_exists(DIRTY_I(sbi))) {
+                memset(DIRTY_I(sbi)->pinned_secmap, 0, bitmap_size);
+                DIRTY_I(sbi)->pinned_secmap_cnt = 0;
+        }
+        DIRTY_I(sbi)->enable_pin_section = enable;
+}
+
+static int f2fs_gc_pinned_control(struct inode *inode, int gc_type,
+                                                        unsigned int segno)
+{
+        if (!f2fs_is_pinned_file(inode))
+                return 0;
+        if (gc_type != FG_GC)
+                return -EBUSY;
+        if (!f2fs_pin_section(F2FS_I_SB(inode), segno))
+                f2fs_pin_file_control(inode, true);
+        return -EAGAIN;
+}
+
 /*
  * This function is called from two paths.
  * One is garbage collection and the other is SSR segment selection.
@@ -1492,6 +1540,8 @@ next_step:
 		ofs_in_node = le16_to_cpu(entry->ofs_in_node);
 
 		if (phase == 3) {
+			int err;
+
 			inode = f2fs_iget(sb, dni.ino);
 			if (IS_ERR(inode) || is_bad_inode(inode) ||
 					special_file(inode->i_mode))

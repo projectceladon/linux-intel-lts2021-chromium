@@ -87,10 +87,10 @@ static struct ctl_table user_table[] = {
 	UCOUNT_ENTRY("max_fanotify_groups"),
 	UCOUNT_ENTRY("max_fanotify_marks"),
 #endif
-	{ },
-	{ },
-	{ },
-	{ },
+ { },
+ { },
+ { },
+ { },
 	{ }
 };
 #endif /* CONFIG_SYSCTL */
@@ -262,7 +262,6 @@ long inc_rlimit_ucounts(struct ucounts *ucounts, enum ucount_type type, long v)
 	struct ucounts *iter;
 	long max = LONG_MAX;
 	long ret = 0;
-
 	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
 		long new = atomic_long_add_return(v, &iter->ucount[type]);
 		if (new < 0 || new > max)
@@ -305,14 +304,13 @@ void dec_rlimit_put_ucounts(struct ucounts *ucounts, enum ucount_type type)
 	do_dec_rlimit_put_ucounts(ucounts, NULL, type);
 }
 
-long inc_rlimit_get_ucounts(struct ucounts *ucounts, enum rlimit_type type,
+long inc_rlimit_get_ucounts(struct ucounts *ucounts, enum ucount_type type,
 			    bool override_rlimit)
 {
 	/* Caller must hold a reference to ucounts */
 	struct ucounts *iter;
 	long max = LONG_MAX;
 	long dec, ret = 0;
-
 	for (iter = ucounts; iter; iter = iter->ns->ucounts) {
 		long new = atomic_long_add_return(1, &iter->ucount[type]);
 		if (new < 0 || new > max)
@@ -338,7 +336,7 @@ dec_unwind:
 	return 0;
 }
 
-bool is_rlimit_overlimit(struct ucounts *ucounts, enum rlimit_type type, unsigned long rlimit)
+bool is_rlimit_overlimit(struct ucounts *ucounts, enum ucount_type type, unsigned long rlimit)
 {
 	struct ucounts *iter;
 	long max = rlimit;

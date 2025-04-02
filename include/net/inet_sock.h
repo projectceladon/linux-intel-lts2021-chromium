@@ -216,7 +216,7 @@ struct inet_sock {
 #define inet_rcv_saddr		sk.__sk_common.skc_rcv_saddr
 #define inet_dport		sk.__sk_common.skc_dport
 #define inet_num		sk.__sk_common.skc_num
-
+	unsigned long           inet_flags;
 	__be32			inet_saddr;
 	__s16			uc_ttl;
 	__u16			cmsg_flags;
@@ -254,21 +254,65 @@ struct inet_sock {
 #define IPCORK_OPT	1	/* ip-options has been held in ipcork.opt */
 #define IPCORK_ALLFRAG	2	/* always fragment (for ipv6 for now) */
 
-/* cmsg flags for inet */
-#define IP_CMSG_PKTINFO		BIT(0)
-#define IP_CMSG_TTL		BIT(1)
-#define IP_CMSG_TOS		BIT(2)
-#define IP_CMSG_RECVOPTS	BIT(3)
-#define IP_CMSG_RETOPTS		BIT(4)
-#define IP_CMSG_PASSSEC		BIT(5)
-#define IP_CMSG_ORIGDSTADDR	BIT(6)
-#define IP_CMSG_CHECKSUM	BIT(7)
-#define IP_CMSG_RECVFRAGSIZE	BIT(8)
+enum {
+        INET_FLAGS_PKTINFO      = 0,
+        INET_FLAGS_TTL          = 1,
+        INET_FLAGS_TOS          = 2,
+        INET_FLAGS_RECVOPTS     = 3,
+        INET_FLAGS_RETOPTS      = 4,
+        INET_FLAGS_PASSSEC      = 5,
+        INET_FLAGS_ORIGDSTADDR  = 6,
+        INET_FLAGS_CHECKSUM     = 7,
+        INET_FLAGS_RECVFRAGSIZE = 8,
 
-static inline bool sk_is_inet(struct sock *sk)
+        INET_FLAGS_RECVERR      = 9,
+        INET_FLAGS_RECVERR_RFC4884 = 10,
+        INET_FLAGS_FREEBIND     = 11,
+        INET_FLAGS_HDRINCL      = 12,
+        INET_FLAGS_MC_LOOP      = 13,
+        INET_FLAGS_MC_ALL       = 14,
+        INET_FLAGS_TRANSPARENT  = 15,
+        INET_FLAGS_IS_ICSK      = 16,
+        INET_FLAGS_NODEFRAG     = 17,
+        INET_FLAGS_BIND_ADDRESS_NO_PORT = 18,
+        INET_FLAGS_DEFER_CONNECT = 19,
+};
+
+/* cmsg flags for inet */
+#define IP_CMSG_PKTINFO         BIT(INET_FLAGS_PKTINFO)
+#define IP_CMSG_TTL             BIT(INET_FLAGS_TTL)
+#define IP_CMSG_TOS             BIT(INET_FLAGS_TOS)
+#define IP_CMSG_RECVOPTS        BIT(INET_FLAGS_RECVOPTS)
+#define IP_CMSG_RETOPTS         BIT(INET_FLAGS_RETOPTS)
+#define IP_CMSG_PASSSEC         BIT(INET_FLAGS_PASSSEC)
+#define IP_CMSG_ORIGDSTADDR     BIT(INET_FLAGS_ORIGDSTADDR)
+#define IP_CMSG_CHECKSUM        BIT(INET_FLAGS_CHECKSUM)
+#define IP_CMSG_RECVFRAGSIZE    BIT(INET_FLAGS_RECVFRAGSIZE)
+
+#define IP_CMSG_ALL     (IP_CMSG_PKTINFO | IP_CMSG_TTL |                \
+                         IP_CMSG_TOS | IP_CMSG_RECVOPTS |               \
+                         IP_CMSG_RETOPTS | IP_CMSG_PASSSEC |            \
+                         IP_CMSG_ORIGDSTADDR | IP_CMSG_CHECKSUM |       \
+                         IP_CMSG_RECVFRAGSIZE)
+
+static inline bool sk_is_inet(const struct sock *sk)
 {
 	return sk->sk_family == AF_INET || sk->sk_family == AF_INET6;
 }
+
+static inline unsigned long inet_cmsg_flags(const struct inet_sock *inet)
+{
+        return READ_ONCE(inet->inet_flags) & IP_CMSG_ALL;
+}
+
+#define inet_test_bit(nr, sk)                   \
+        test_bit(INET_FLAGS_##nr, &inet_sk(sk)->inet_flags)
+#define inet_set_bit(nr, sk)                    \
+        set_bit(INET_FLAGS_##nr, &inet_sk(sk)->inet_flags)
+#define inet_clear_bit(nr, sk)                  \
+        clear_bit(INET_FLAGS_##nr, &inet_sk(sk)->inet_flags)
+#define inet_assign_bit(nr, sk, val)            \
+        assign_bit(INET_FLAGS_##nr, &inet_sk(sk)->inet_flags, val)
 
 /**
  * sk_to_full_sk - Access to a full socket
